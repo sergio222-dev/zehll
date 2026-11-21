@@ -1,7 +1,10 @@
 mod audio;
+mod bluetooth;
 mod calendar;
+mod dbus;
 mod hyprland;
 mod menu;
+mod network;
 mod panel;
 mod shape;
 mod shortcuts;
@@ -94,6 +97,8 @@ struct Bar {
     panel_closed_at: Option<Instant>,
     calendar_month: NaiveDate,
     audio: Option<audio::Audio>,
+    network: Option<network::Network>,
+    bluetooth: Option<bluetooth::Bluetooth>,
 }
 
 enum Surface {
@@ -133,6 +138,8 @@ impl Bar {
             panel_closed_at: None,
             calendar_month: panel::first_of_month(Local::now().date_naive()),
             audio: None,
+            network: None,
+            bluetooth: None,
         };
         (bar, Task::none())
     }
@@ -174,6 +181,10 @@ enum Message {
     PowerMenu,
     Audio(audio::Audio),
     ToggleMute(&'static str),
+    Network(network::Network),
+    SetWifi(bool),
+    Bluetooth(bluetooth::Bluetooth),
+    SetBluetooth(zbus::zvariant::OwnedObjectPath, bool),
 }
 
 fn namespace() -> String {
@@ -186,6 +197,8 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Some(_) => Subscription::batch([
             keyboard::listen().map(Message::Key),
             Subscription::run(audio::events).map(Message::Audio),
+            Subscription::run(network::events).map(Message::Network),
+            Subscription::run(bluetooth::events).map(Message::Bluetooth),
         ]),
         None => Subscription::none(),
     };
@@ -365,6 +378,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::Audio(audio) => bar.audio = Some(audio),
         Message::ToggleMute(target) => return Task::future(audio::toggle_mute(target)).discard(),
+        Message::Network(network) => bar.network = Some(network),
+        Message::SetWifi(enabled) => return Task::future(network::set_wifi(enabled)).discard(),
+        Message::Bluetooth(bluetooth) => bar.bluetooth = Some(bluetooth),
+        Message::SetBluetooth(adapter, powered) => {
+            return Task::future(bluetooth::set_powered(adapter, powered)).discard();
+        }
         Message::PowerMenu => {
             if let Err(err) = std::process::Command::new("wlogout").spawn() {
                 eprintln!("zehll: cannot start wlogout: {err}");

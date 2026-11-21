@@ -4,7 +4,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::{
     BODY_BOLD, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, audio, calendar, glow_style, line,
-    panel_style, shape, slanted, system,
+    network, panel_style, shape, slanted, system,
 };
 
 pub const WIDTH: u32 = 460;
@@ -72,24 +72,53 @@ struct Toggle {
 
 fn quick_settings(bar: &Bar) -> Option<Element<'_, Message>> {
     let theme = bar.theme;
-    let audio = bar.audio.as_ref()?;
-    let output = &audio.output;
-    let toggles = [
-        Toggle {
+    let mut toggles = Vec::new();
+    if let Some(network) = &bar.network {
+        toggles.push(Toggle {
+            icon: match (network.connected, network.kind) {
+                (false, _) => "wifi_off",
+                (true, network::Kind::Wired) => "lan",
+                (true, _) => "wifi",
+            },
+            name: "Internet",
+            state: network.label(),
+            on: network.connected,
+            message: Message::SetWifi(!network.wifi_enabled),
+        });
+    }
+    if let Some(bluetooth) = &bar.bluetooth {
+        toggles.push(Toggle {
+            icon: match (bluetooth.powered, bluetooth.device.is_some()) {
+                (false, _) => "bluetooth_disabled",
+                (true, true) => "bluetooth_connected",
+                (true, false) => "bluetooth",
+            },
+            name: "Bluetooth",
+            state: bluetooth.label(),
+            on: bluetooth.powered,
+            message: Message::SetBluetooth(bluetooth.adapter.clone(), !bluetooth.powered),
+        });
+    }
+    if let Some(audio) = &bar.audio {
+        let output = &audio.output;
+        toggles.push(Toggle {
             icon: if output.muted { "volume_off" } else { "volume_up" },
             name: "Audio output",
             state: if output.muted { String::from("MUTED") } else { format!("UNMUTED · {:.0}%", output.volume * 100.0) },
             on: !output.muted,
             message: Message::ToggleMute(audio::OUTPUT),
-        },
-        Toggle {
+        });
+        toggles.push(Toggle {
             icon: if audio.input.muted { "mic_off" } else { "mic" },
             name: "Microphone",
             state: String::from(if audio.input.muted { "MUTED" } else { "LIVE" }),
             on: !audio.input.muted,
             message: Message::ToggleMute(audio::INPUT),
-        },
-    ];
+        });
+    }
+    if toggles.is_empty() {
+        return None;
+    }
 
     let on = toggles.iter().filter(|toggle| toggle.on).count();
     let strip = row![
