@@ -130,6 +130,7 @@ struct Bar {
     app_icons: HashMap<String, Option<tray::Icon>>,
     // Stream index and volume while a volume slider is being dragged.
     volume_drag: Option<(u32, u32)>,
+    sink_picker_open: bool,
     wifi: Option<network::Wifi>,
     // SSID asking for a password in the Wi-Fi sub-panel.
     wifi_prompt: Option<String>,
@@ -198,6 +199,7 @@ impl Bar {
             mixer: None,
             app_icons: HashMap::new(),
             volume_drag: None,
+            sink_picker_open: false,
             wifi: None,
             wifi_prompt: None,
             wifi_password: String::new(),
@@ -279,6 +281,7 @@ enum Message {
     SetStreamVolume(u32, u32),
     DragStreamVolume(u32, u32),
     ReleaseStreamVolume,
+    ToggleSinkPicker,
     SetDefaultSink(String),
     BluetoothDevice(bluetooth::DeviceAction),
     Wifi(network::Wifi),
@@ -499,6 +502,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::OpenSubpanel(subpanel) => {
             bar.subpanel = Some(subpanel);
             bar.wifi_prompt = None;
+            bar.sink_picker_open = false;
         }
         Message::CloseSubpanel => bar.subpanel = None,
         Message::SubpanelDetails(subpanel) => {
@@ -523,7 +527,11 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 return Task::future(mixer::set_volume(index, percent)).discard();
             }
         }
-        Message::SetDefaultSink(name) => return Task::future(mixer::set_default_sink(name)).discard(),
+        Message::ToggleSinkPicker => bar.sink_picker_open = !bar.sink_picker_open,
+        Message::SetDefaultSink(name) => {
+            bar.sink_picker_open = false;
+            return Task::future(mixer::set_default_sink(name)).discard();
+        }
         Message::BluetoothDevice(action) => return Task::future(bluetooth::run(action)).discard(),
         Message::Wifi(wifi) => bar.wifi = Some(wifi),
         Message::SelectWifi(ssid) => {

@@ -1,6 +1,4 @@
-use std::fmt;
-
-use iced::widget::{Column, Row, Space, Stack, button, column, container, mouse_area, pick_list, row, scrollable, slider, text, text_input};
+use iced::widget::{Column, Row, Space, Stack, button, column, container, mouse_area, row, scrollable, slider, text, text_input};
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, bluetooth, glow_style, line, mixer, network, shape, slanted, tray};
@@ -74,49 +72,64 @@ fn frame<'a>(bar: &'a Bar, title: &'a str, count: String, body: Element<'a, Mess
         .into()
 }
 
-/// An output device in the picker; shown by its description.
-#[derive(Debug, Clone, PartialEq)]
-struct SinkOption(mixer::Sink);
-
-impl fmt::Display for SinkOption {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0.description.to_uppercase())
-    }
-}
-
 fn audio(bar: &Bar) -> Element<'_, Message> {
     let theme = bar.theme;
     let mixer = bar.mixer.as_ref();
     let streams = mixer.map(|mixer| mixer.streams.as_slice()).unwrap_or_default();
 
     let list = Column::with_children(streams.iter().map(|stream| stream_row(bar, stream))).spacing(14);
-    let sinks: Vec<SinkOption> = mixer.map(|mixer| mixer.sinks.iter().cloned().map(SinkOption).collect()).unwrap_or_default();
-    let selected = mixer.and_then(|mixer| sinks.iter().find(|sink| sink.0.name == mixer.default_sink).cloned());
-    let device = pick_list(sinks, selected, |sink: SinkOption| Message::SetDefaultSink(sink.0.name))
-        .font(CONDENSED_BOLD)
-        .text_size(16)
-        .padding([10, 14])
+    let sinks = mixer.map(|mixer| mixer.sinks.as_slice()).unwrap_or_default();
+    let default_sink = mixer.map(|mixer| mixer.default_sink.as_str()).unwrap_or_default();
+    let current = sinks.iter().find(|sink| sink.name == default_sink).map(|sink| sink.description.to_uppercase()).unwrap_or_default();
+    let arrow = if bar.sink_picker_open { "expand_less" } else { "expand_more" };
+    let picker = row![
+        text(current).font(CONDENSED_BOLD).size(16).width(Length::Fill),
+        text(arrow).font(ICON_FONT).size(18).shaping(text::Shaping::Advanced),
+    ]
+    .align_y(Alignment::Center);
+    let picker_open = bar.sink_picker_open;
+    let picker = button(container(picker).padding([0, 14]).center_y(42))
+        .on_press(Message::ToggleSinkPicker)
+        .padding(0)
         .width(Length::Fill)
-        .style(move |_, status| pick_list::Style {
-            text_color: theme.text,
-            placeholder_color: theme.text_muted,
-            handle_color: theme.text,
-            background: theme.section_background.into(),
-            border: Border {
-                color: if matches!(status, pick_list::Status::Hovered | pick_list::Status::Opened { .. }) { theme.glow } else { theme.border },
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-        })
-        .menu_style(move |_| iced::overlay::menu::Style {
-            background: theme.popup_background.into(),
-            border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
-            text_color: theme.text,
-            selected_text_color: theme.on_accent,
-            selected_background: theme.accent.into(),
-            shadow: iced::Shadow::default(),
+        .style(move |_, status| {
+            let mut style = glow_style(theme, status, 8.0);
+            style.background.get_or_insert(theme.section_background.into());
+            if style.border.width == 0.0 || picker_open {
+                style.border = Border { color: if picker_open { theme.glow } else { theme.border }, width: 1.0, radius: 0.0.into() };
+            }
+            style
         });
-    let device = column![text("OUTPUT DEVICE").font(CONDENSED_BOLD).size(13).color(theme.text_muted), device].spacing(6);
+    let mut device = column![picker];
+    if bar.sink_picker_open {
+        // The chosen device keeps a strong accent highlight; hovering only adds the light glow.
+        // The chosen device goes first so it is visible without scrolling.
+        let mut ordered: Vec<&mixer::Sink> = sinks.iter().collect();
+        ordered.sort_by_key(|sink| sink.name != default_sink);
+        let options = Column::with_children(ordered.into_iter().map(|sink| {
+            let chosen = sink.name == default_sink;
+            let name = text(sink.description.to_uppercase()).font(CONDENSED_BOLD).size(15).wrapping(text::Wrapping::None);
+            let label = container(name.color(if chosen { theme.on_accent } else { theme.text }))
+                .clip(true)
+                .padding([0, 14])
+                .center_y(34)
+                .width(Length::Fill);
+            let label: Element<'_, Message> = if chosen { slanted(label, 10.0, theme.accent) } else { label.into() };
+            button(label)
+                .on_press(Message::SetDefaultSink(sink.name.clone()))
+                .padding(0)
+                .width(Length::Fill)
+                .style(move |_, status| if chosen { button::Style::default() } else { glow_style(theme, status, 6.0) })
+                .into()
+        }))
+        .spacing(2);
+        device = device.push(container(scrollable(options)).max_height(220.0).padding(4).style(move |_| container::Style {
+            background: Some(Color { a: 1.0, ..theme.popup_background }.into()),
+            border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
+            ..Default::default()
+        }));
+    }
+    let device = column![text("OUTPUT DEVICE").font(CONDENSED_BOLD).size(13).color(theme.text_muted), device.spacing(4)].spacing(6);
 
     let body = column![scrollable(list).height(Length::Fill), device].spacing(14).into();
     frame(bar, "AUDIO OUTPUT", format!("{} STREAMS", streams.len()), body, Subpanel::Audio)
