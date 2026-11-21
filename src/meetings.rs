@@ -1,6 +1,8 @@
 //! Google Calendar meetings fetched by `scripts/gcal.py`, and the pure rules the bar
 //! pill, its tooltip and the calendar popover are drawn from.
 
+use std::collections::HashSet;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeDelta, TimeZone};
 
 /// A timed meeting, with its times already converted to the local time zone.
@@ -165,6 +167,42 @@ pub fn has_meet_link(meeting: &Meeting) -> bool {
     meeting.link.starts_with("https://meet.google.com/")
 }
 
+/// Minutes before the start at which the heads-up notification fires.
+pub const LEAD_MINUTES: i64 = 5;
+/// How long after the start a missed alert card still opens (e.g. after a late fetch).
+pub const LATE_MINUTES: i64 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AlertKind {
+    /// `Starts in 5 minutes` notification, no sound.
+    Warning,
+    /// Persistent ringing card.
+    Start,
+}
+
+/// Alerts that became due at `now`, each meeting at most once per kind.
+/// `fired` remembers what already fired; a rescheduled meeting fires again.
+pub fn due_alerts<'a>(
+    meetings: &'a [Meeting],
+    now: NaiveDateTime,
+    fired: &mut HashSet<String>,
+) -> Vec<(AlertKind, &'a Meeting)> {
+    meetings
+        .iter()
+        .filter_map(|meeting| {
+            let left = meeting.start - now;
+            let kind = if left > TimeDelta::zero() && left <= TimeDelta::minutes(LEAD_MINUTES) {
+                AlertKind::Warning
+            } else if left <= TimeDelta::zero() && left >= -TimeDelta::minutes(LATE_MINUTES) {
+                AlertKind::Start
+            } else {
+                return None;
+            };
+            fired.insert(format!("{kind:?}|{}|{}", meeting.id, meeting.start)).then_some((kind, meeting))
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +352,46 @@ mod tests {
         assert!(has_meet_link(&m));
         m.link = "https://www.google.com/calendar/event?eid=abc".into();
         assert!(!has_meet_link(&m));
+    }
+
+    fn due(meetings: &[Meeting], now: NaiveDateTime, fired: &mut HashSet<String>) -> Vec<(AlertKind, String)> {
+        due_alerts(meetings, now, fired).into_iter().map(|(kind, m)| (kind, m.id.clone())).collect()
+    }
+
+    #[test]
+    fn warning_fires_once_inside_the_lead_window() {
+        let meetings = day();
+        let mut fired = HashSet::new();
+        assert!(due(&meetings, at(21, 9, 54), &mut fired).is_empty());
+        assert_eq!(due(&meetings, at(21, 9, 55), &mut fired), [(AlertKind::Warning, "review".to_string())]);
+        assert!(due(&meetings, at(21, 9, 57), &mut fired).is_empty());
+    }
+
+    #[test]
+    fn start_card_fires_once_at_start_and_while_late() {
+        let meetings = day();
+        let mut fired = HashSet::new();
+        due(&meetings, at(21, 9, 56), &mut fired);
+        assert_eq!(due(&meetings, at(21, 10, 0), &mut fired), [(AlertKind::Start, "review".to_string())]);
+        assert!(due(&meetings, at(21, 10, 1), &mut fired).is_empty());
+
+        let mut late = HashSet::new();
+        assert_eq!(due(&meetings, at(21, 10, 5), &mut late), [(AlertKind::Start, "review".to_string())]);
+        let mut too_late = HashSet::new();
+        assert!(due(&meetings, at(21, 10, 5) + TimeDelta::seconds(1), &mut too_late).is_empty());
+    }
+
+    #[test]
+    fn overlapping_meetings_alert_together_and_reschedules_fire_again() {
+        let mut meetings = day();
+        meetings.push(meeting("one-on-one", at(21, 10, 0), at(21, 10, 30)));
+        let mut fired = HashSet::new();
+        assert_eq!(
+            due(&meetings, at(21, 10, 0), &mut fired),
+            [(AlertKind::Start, "review".to_string()), (AlertKind::Start, "one-on-one".to_string())]
+        );
+
+        meetings[1].start = at(21, 11, 0);
+        assert_eq!(due(&meetings, at(21, 10, 56), &mut fired), [(AlertKind::Warning, "review".to_string())]);
     }
 }
