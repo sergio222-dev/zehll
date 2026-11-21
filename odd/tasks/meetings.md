@@ -24,7 +24,7 @@ Delivery: one commit per task. Test runner: `cargo test`.
 | T10 | S3 | inline | done | `feat: show alert cards when a meeting starts` (61864f4) |
 | T11 | S3 | inline | done | `feat: ring while a meeting alert is open` (8c21994) |
 | T12 | S3 | inline | done | `feat: add the zehll:meetingTest shortcut` (7ec450b) |
-| T7, T13 | S1, S3 | inline | done | `docs: document meetings, the calendar and alerts` |
+| T7, T13 | S1, S3 | inline | done | `docs: document meetings, the calendar and alerts` (b116b68) |
 
 T1 `gcal.py` range + `end`; T2 `meetings.rs` model and pure helpers; T8 `due_alerts`; T3 fetch subscription; T4 bar pill; T5 pill tooltip; T6 calendar popover; T9 5 min notification; T10 alert card surface; T11 ringing; T12 `zehll:meetingTest` shortcut; T7/T13 README. Route: inline, no writer trigger (sequential units sharing `main.rs`).
 
