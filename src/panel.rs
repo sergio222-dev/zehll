@@ -577,7 +577,7 @@ fn day_cell<'a>(bar: &'a Bar, day: &calendar::Day, is_today: bool) -> Element<'a
         .into()
 }
 
-fn nav_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'a, Message> {
+pub fn nav_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'a, Message> {
     let theme = bar.theme;
     button(container(crate::icon_sized(icon, 18.0)).center(30))
         .on_press(message)

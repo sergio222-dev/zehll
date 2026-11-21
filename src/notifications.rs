@@ -143,12 +143,12 @@ impl Handle {
 }
 
 /// Sends a notification to whichever daemon owns the name, as any other client would.
-pub async fn send(summary: &str, body: &str) {
+pub async fn send(app: &str, icon: &str, summary: &str, body: &str) {
     let result = async {
         let connection = Connection::session().await?;
         let hints: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
         connection
-            .call_method(Some(NAME), PATH, Some(NAME), "Notify", &("Zehll", 0u32, "timer", summary, body, Vec::<&str>::new(), hints, -1i32))
+            .call_method(Some(NAME), PATH, Some(NAME), "Notify", &(app, 0u32, icon, summary, body, Vec::<&str>::new(), hints, -1i32))
             .await?;
         zbus::Result::Ok(())
     };

@@ -10,11 +10,33 @@ use wayland_client::{Connection, Dispatch, QueueHandle};
 use wayland_protocols_hyprland::global_shortcuts::v1::client::hyprland_global_shortcut_v1::{self, HyprlandGlobalShortcutV1};
 use wayland_protocols_hyprland::global_shortcuts::v1::client::hyprland_global_shortcuts_manager_v1::HyprlandGlobalShortcutsManagerV1;
 
-/// Bound in Hyprland as `global, zehll:panelToggle`.
-const PANEL_TOGGLE: &str = "panelToggle";
+/// Hyprland global shortcuts, bound as `global, zehll:<name>`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Shortcut {
+    PanelToggle,
+    MeetingTest,
+}
 
-/// Emits once per press of the `zehll:panelToggle` global shortcut.
-pub fn panel_toggle() -> impl Stream<Item = ()> {
+impl Shortcut {
+    const ALL: [Shortcut; 2] = [Shortcut::PanelToggle, Shortcut::MeetingTest];
+
+    fn name(self) -> &'static str {
+        match self {
+            Shortcut::PanelToggle => "panelToggle",
+            Shortcut::MeetingTest => "meetingTest",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Shortcut::PanelToggle => "Toggle the side panel",
+            Shortcut::MeetingTest => "Show a test meeting alert",
+        }
+    }
+}
+
+/// Emits each press of a `zehll:` global shortcut.
+pub fn events() -> impl Stream<Item = Shortcut> {
     stream::channel(1, async |mut output| {
         // The protocol needs its own Wayland connection, which blocks while waiting for events.
         let (sender, mut receiver) = mpsc::unbounded();
@@ -23,8 +45,8 @@ pub fn panel_toggle() -> impl Stream<Item = ()> {
                 eprintln!("zehll: global shortcuts unavailable: {err}");
             }
         });
-        while receiver.next().await.is_some() {
-            if output.send(()).await.is_err() {
+        while let Some(shortcut) = receiver.next().await {
+            if output.send(shortcut).await.is_err() {
                 return;
             }
         }
@@ -32,22 +54,24 @@ pub fn panel_toggle() -> impl Stream<Item = ()> {
 }
 
 struct State {
-    pressed: mpsc::UnboundedSender<()>,
+    pressed: mpsc::UnboundedSender<Shortcut>,
 }
 
-fn listen(pressed: mpsc::UnboundedSender<()>) -> Result<(), Box<dyn Error>> {
+fn listen(pressed: mpsc::UnboundedSender<Shortcut>) -> Result<(), Box<dyn Error>> {
     let connection = Connection::connect_to_env()?;
     let (globals, mut queue) = registry_queue_init::<State>(&connection)?;
     let handle = queue.handle();
     let manager: HyprlandGlobalShortcutsManagerV1 = globals.bind(&handle, 1..=1, ())?;
-    manager.register_shortcut(
-        PANEL_TOGGLE.to_owned(),
-        String::from("zehll"),
-        String::from("Toggle the side panel"),
-        String::new(),
-        &handle,
-        (),
-    );
+    for shortcut in Shortcut::ALL {
+        manager.register_shortcut(
+            shortcut.name().to_owned(),
+            String::from("zehll"),
+            shortcut.description().to_owned(),
+            String::new(),
+            &handle,
+            shortcut,
+        );
+    }
 
     let mut state = State { pressed };
     loop {
@@ -71,17 +95,17 @@ impl Dispatch<HyprlandGlobalShortcutsManagerV1, ()> for State {
     }
 }
 
-impl Dispatch<HyprlandGlobalShortcutV1, ()> for State {
+impl Dispatch<HyprlandGlobalShortcutV1, Shortcut> for State {
     fn event(
         state: &mut Self,
         _: &HyprlandGlobalShortcutV1,
         event: hyprland_global_shortcut_v1::Event,
-        _: &(),
+        shortcut: &Shortcut,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         if let hyprland_global_shortcut_v1::Event::Pressed { .. } = event {
-            let _ = state.pressed.unbounded_send(());
+            let _ = state.pressed.unbounded_send(*shortcut);
         }
     }
 }

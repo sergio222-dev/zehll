@@ -10,6 +10,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - Clock with a hover tooltip: full date, system uptime and pending tasks from the `ii` todo list.
 - System tray (StatusNotifierItem): icons, left/middle click activation and right-click context menus (DBusMenu) with submenus and toggles.
 - Side panel with uptime, reload and power actions, quick settings, notifications, a month calendar and a to-do list shared with ii (`~/.local/state/quickshell/user/todo.json`) and a pomodoro timer (25/5 min, a 15 min break every 4 cycles) that notifies when each phase ends.
+- Google Calendar meetings: the next meeting beside the clock, a calendar popover with each day's agenda, and alerts when a meeting is about to start.
 - One bar per monitor.
 - Material 3 theme loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -19,6 +20,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - A Rust toolchain (edition 2024)
 - [Material Symbols Rounded](https://github.com/google/material-design-icons) font for icons
 - Optional: [matugen](https://github.com/InioX/matugen) for wallpaper-based colors
+- Optional, for meetings: `python3`, a Google OAuth client in `~/.config/calendarz/credentials.json`, `pw-play` (PipeWire) for the alert sound and `xdg-open`
 
 ## Build and run
 
@@ -55,6 +57,28 @@ Quick settings toggle Wi-Fi, Bluetooth, audio output and microphone mute, night 
 ## Notifications
 
 Zehll is a notification daemon (`org.freedesktop.Notifications`); new notifications pop up at the top right (up to three, 5 s by default, critical ones until dismissed) and are listed in the side panel, with do not disturb and clear all. Notifications show their image or app icon and their action buttons; clicking one runs its default action (or hides the popup when it has none), and ✕ dismisses it. If another daemon such as swaync owns the name, Zehll waits in the D-Bus queue and takes over when that daemon exits, so disable the other daemon to use Zehll's.
+
+## Meetings
+
+Zehll reads your Google Calendar with `scripts/gcal.py`, a read-only client that uses only the Python standard library. The script is embedded in the binary and run with `python3`; it reads the OAuth client from `~/.config/calendarz/credentials.json` and keeps its refresh token in `~/.config/calendarz/token.json`, so an existing [calendarz](https://github.com/sergio222-dev/calendarZ) login is reused. To sign in the first time:
+
+```sh
+python3 scripts/gcal.py auth
+```
+
+Meetings are fetched at startup, every 2 minutes and when the calendar shows another month. All-day, cancelled and declined events are skipped.
+
+- **Pill**: beside the clock, the start time of the next meeting in the next 24 hours, with a dot that is grey more than 15 minutes before it, green from 15 to 5 minutes and yellow in the last 5. Hover it for the title and `10:00 – 10:45 · IN 4 MIN`. When the token expires it reads `SIGN IN` in red; click it to sign in again in the browser.
+- **Calendar**: click the date to open the month with ISO week numbers and a dot on days with meetings, and the agenda of the selected day. Past meetings read `DONE`; the next meeting in the next 24 hours is highlighted with `JOIN` (or `OPEN` when it has no Meet link), which opens it in the browser. Click outside it or press Escape to close it.
+- **Alerts**: 5 minutes before a meeting, a normal notification says `Starts in 5 minutes`. When it starts, an alert card opens under the clock with `JOIN` (or `OPEN`) and `DISMISS`; it stays until you use one of them and rings every 5 seconds while any card is open.
+
+To try the alert card without a real meeting, trigger the `zehll:meetingTest` global shortcut, for example with a keybind:
+
+```
+bind = SUPER SHIFT, M, global, zehll:meetingTest
+```
+
+The calendar and the alert cards use the layer namespaces `zehll-calendar`, `zehll-calendar-catcher` and `zehll-meeting-alerts` for layer rules.
 
 ## Theme
 
