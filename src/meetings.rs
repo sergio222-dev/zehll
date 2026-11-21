@@ -181,6 +181,27 @@ pub fn agenda_label(meeting: &Meeting, meetings: &[Meeting], now: NaiveDateTime)
     }
 }
 
+/// Calendar name, plus `Google Meet` when the meeting has a Meet link: `Work · Google Meet`.
+pub fn source(meeting: &Meeting) -> String {
+    match has_meet_link(meeting) {
+        true => format!("{} · Google Meet", meeting.calendar),
+        false => meeting.calendar.clone(),
+    }
+}
+
+/// Second line of an alert card: `10:00 – 10:45 · Work · Google Meet`.
+pub fn alert_meta(meeting: &Meeting) -> String {
+    format!("{} – {} · {}", meeting.start.format("%H:%M"), meeting.end.format("%H:%M"), source(meeting))
+}
+
+/// Status of an alert card: `STARTING NOW`, `STARTED 1 MIN AGO`, `STARTED 4 MIN AGO`.
+pub fn started_label(meeting: &Meeting, now: NaiveDateTime) -> String {
+    match (now - meeting.start).num_minutes().max(0) {
+        0 => "STARTING NOW".into(),
+        minutes => format!("STARTED {minutes} MIN AGO"),
+    }
+}
+
 /// Agenda header: `NO MEETINGS`, `1 MEETING`, `3 MEETINGS`.
 pub fn meeting_count(count: usize) -> String {
     match count {
@@ -420,6 +441,21 @@ mod tests {
         assert_eq!(ids, ["early", "standup", "review", "sync"]);
         assert!(has_meetings(&meetings, at(22, 0, 0).date()));
         assert!(!has_meetings(&meetings, at(23, 0, 0).date()));
+    }
+
+    #[test]
+    fn alert_card_texts() {
+        let mut m = meeting("review", at(21, 10, 0), at(21, 10, 45));
+        assert_eq!(source(&m), "Work · Google Meet");
+        assert_eq!(alert_meta(&m), "10:00 – 10:45 · Work · Google Meet");
+        m.link = "https://www.google.com/calendar/event?eid=abc".into();
+        assert_eq!(source(&m), "Work");
+        assert_eq!(alert_meta(&m), "10:00 – 10:45 · Work");
+
+        assert_eq!(started_label(&m, at(21, 10, 0)), "STARTING NOW");
+        assert_eq!(started_label(&m, at(21, 10, 0) + TimeDelta::seconds(59)), "STARTING NOW");
+        assert_eq!(started_label(&m, at(21, 10, 1)), "STARTED 1 MIN AGO");
+        assert_eq!(started_label(&m, at(21, 10, 4) + TimeDelta::seconds(30)), "STARTED 4 MIN AGO");
     }
 
     #[test]

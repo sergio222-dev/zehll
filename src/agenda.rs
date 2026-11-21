@@ -148,10 +148,7 @@ fn meeting_row<'a>(bar: &'a Bar, meeting: &'a Meeting) -> Element<'a, Message> {
     ]
     .spacing(2)
     .width(58);
-    let source = match meetings::has_meet_link(meeting) {
-        true => format!("{} · Google Meet", meeting.calendar),
-        false => meeting.calendar.clone(),
-    };
+    let source = meetings::source(meeting);
     let details = column![
         text(&meeting.title).font(BODY_BOLD).size(15).color(strong).wrapping(text::Wrapping::None),
         text(source).font(BODY_FONT).size(12).color(muted).wrapping(text::Wrapping::None),
@@ -166,7 +163,8 @@ fn meeting_row<'a>(bar: &'a Bar, meeting: &'a Meeting) -> Element<'a, Message> {
         .color(if highlighted { NEXT_BADGE } else { muted });
     let status: Element<'_, Message> = match state {
         AgendaState::Next | AgendaState::Now => {
-            column![badge, join_button(bar, meeting)].spacing(6).align_x(Alignment::End).into()
+            let join = join_button(bar, meeting, Message::OpenMeetingLink(meeting.link.clone()));
+            column![badge, join].spacing(6).align_x(Alignment::End).into()
         }
         AgendaState::Done | AgendaState::Later => badge.into(),
     };
@@ -190,7 +188,7 @@ fn meeting_row<'a>(bar: &'a Bar, meeting: &'a Meeting) -> Element<'a, Message> {
 }
 
 /// `JOIN` for a Google Meet link, `OPEN` for the event page.
-pub fn join_button<'a>(bar: &'a Bar, meeting: &'a Meeting) -> Element<'a, Message> {
+pub fn join_button<'a>(bar: &'a Bar, meeting: &Meeting, on_press: Message) -> Element<'a, Message> {
     let theme = bar.theme;
     let label = if meetings::has_meet_link(meeting) { "JOIN" } else { "OPEN" };
     let content = row![
@@ -204,7 +202,7 @@ pub fn join_button<'a>(bar: &'a Bar, meeting: &'a Meeting) -> Element<'a, Messag
     .align_y(Alignment::Center);
     let content = container(content).padding(Padding { top: 0.0, right: 22.0, bottom: 0.0, left: 12.0 }).center_y(30);
     button(slanted(content, 10.0, theme.accent))
-        .on_press(Message::OpenMeetingLink(meeting.link.clone()))
+        .on_press(on_press)
         .padding(0)
         .style(|_, _| button::Style::default())
         .into()

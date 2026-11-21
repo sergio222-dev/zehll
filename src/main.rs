@@ -1,4 +1,5 @@
 mod agenda;
+mod alert;
 mod audio;
 mod bluetooth;
 mod brightness;
@@ -30,7 +31,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use chrono::{DateTime, Datelike, Local, NaiveDate};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveDateTime};
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{Column, Row, Space, Stack, button, canvas, column, container, image, mouse_area, row, svg, text};
 use iced::window::Id;
@@ -159,6 +160,9 @@ struct Bar {
     meetings_signing_in: bool,
     // Meeting alerts already raised, so each fires once (see `meetings::due_alerts`).
     meetings_fired: HashSet<String>,
+    // Meetings that started and still show an alert card, the ringing one first.
+    meeting_alerts: Vec<meetings::Meeting>,
+    alert_surface: Option<Id>,
     // Calendar popover and its click catcher.
     calendar: Option<OpenPanel>,
     // Day whose agenda the calendar popover shows.
@@ -175,6 +179,7 @@ enum Surface {
     TrayMenu(OpenMenu),
     Panel,
     Calendar,
+    MeetingAlerts,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
     Catcher,
@@ -249,6 +254,8 @@ impl Bar {
             meetings_status: meetings::Status::Ok,
             meetings_signing_in: false,
             meetings_fired: HashSet::new(),
+            meeting_alerts: Vec::new(),
+            alert_surface: None,
             calendar: None,
             calendar_day: Local::now().date_naive(),
         };
@@ -362,6 +369,8 @@ enum Message {
     ToggleCalendar,
     SelectDay(NaiveDate),
     OpenMeetingLink(String),
+    DismissMeetingAlert(String, NaiveDateTime),
+    JoinMeetingAlert(String, NaiveDateTime),
     SignedInMeetings,
     Meetings((NaiveDate, NaiveDate), meetings::Status, Vec<meetings::Meeting>),
 }
@@ -586,6 +595,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.popup_surface == Some(id) {
                 bar.popup_surface = None;
             }
+            if bar.alert_surface == Some(id) {
+                bar.alert_surface = None;
+            }
             if bar.panel.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
                 return close_panel(bar);
             }
@@ -705,10 +717,19 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
         }
         Message::OpenMeetingLink(link) => {
-            if let Err(err) = std::process::Command::new("xdg-open").arg(&link).spawn() {
-                eprintln!("zehll: cannot open {link}: {err}");
-            }
+            open_link(&link);
             return close_calendar(bar);
+        }
+        Message::DismissMeetingAlert(id, start) => {
+            bar.meeting_alerts.retain(|meeting| meeting.id != id || meeting.start != start);
+            return sync_alert_cards(bar);
+        }
+        Message::JoinMeetingAlert(id, start) => {
+            if let Some(meeting) = bar.meeting_alerts.iter().find(|meeting| meeting.id == id && meeting.start == start) {
+                open_link(&meeting.link);
+            }
+            bar.meeting_alerts.retain(|meeting| meeting.id != id || meeting.start != start);
+            return sync_alert_cards(bar);
         }
         Message::SignInMeetings => {
             if !bar.meetings_signing_in {
@@ -869,21 +890,75 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
     Task::none()
 }
 
-/// Raises the meeting alerts due now: the heads-up notification 5 minutes before.
+/// Raises the meeting alerts due now: the heads-up notification 5 minutes before, and the
+/// alert card at the start.
 fn meeting_alerts(bar: &mut Bar) -> Vec<Task<Message>> {
     let now = bar.now.naive_local();
-    meetings::due_alerts(&bar.meetings, now, &mut bar.meetings_fired)
+    let due: Vec<_> = meetings::due_alerts(&bar.meetings, now, &mut bar.meetings_fired)
         .into_iter()
-        .filter_map(|(kind, meeting)| match kind {
+        .map(|(kind, meeting)| (kind, meeting.clone()))
+        .collect();
+    let mut tasks = Vec::new();
+    let mut started = false;
+    for (kind, meeting) in due {
+        match kind {
             meetings::AlertKind::Warning => {
-                let (summary, body) = meetings::warning_text(meeting);
+                let (summary, body) = meetings::warning_text(&meeting);
                 let send = async move { notifications::send("Calendar", "x-office-calendar", &summary, &body).await };
-                Some(Task::future(send).discard())
+                tasks.push(Task::future(send).discard());
             }
-            // Meetings starting now get no card yet.
-            meetings::AlertKind::Start => None,
-        })
-        .collect()
+            meetings::AlertKind::Start => {
+                bar.meeting_alerts.push(meeting);
+                started = true;
+            }
+        }
+    }
+    if started {
+        // The cards open where the calendar popover is.
+        tasks.push(close_calendar(bar));
+        tasks.push(sync_alert_cards(bar));
+    }
+    tasks
+}
+
+/// Opens a meeting's Meet link or event page in the browser.
+fn open_link(link: &str) {
+    if let Err(err) = std::process::Command::new("xdg-open").arg(link).spawn() {
+        eprintln!("zehll: cannot open {link}: {err}");
+    }
+}
+
+/// Opens, resizes or closes the alert card surface, centered under the clock.
+fn sync_alert_cards(bar: &mut Bar) -> Task<Message> {
+    let height = alert::height(bar.meeting_alerts.len());
+    match (bar.alert_surface, height) {
+        (Some(id), 0) => {
+            bar.alert_surface = None;
+            Task::done(Message::RemoveWindow(id))
+        }
+        (Some(id), height) => Task::done(Message::SizeChange { id, size: (alert::WIDTH, height) }),
+        (None, 0) => Task::none(),
+        (None, height) => {
+            let Some(output) = hyprland::focused_monitor() else {
+                return Task::none();
+            };
+            let settings = NewLayerShellSettings {
+                size: Some((alert::WIDTH, height)),
+                layer: Layer::Overlay,
+                anchor: Anchor::Top,
+                exclusive_zone: Some(0),
+                margin: Some((14, 0, 0, 0)),
+                keyboard_interactivity: KeyboardInteractivity::None,
+                output_option: OutputOption::OutputName(output),
+                events_transparent: false,
+                namespace: Some(String::from("zehll-meeting-alerts")),
+            };
+            let id = Id::unique();
+            bar.alert_surface = Some(id);
+            bar.surfaces.insert(id, Surface::MeetingAlerts);
+            Task::done(Message::NewLayerShell { settings, id })
+        }
+    }
 }
 
 fn pomodoro_finished(finished: pomodoro::Phase) -> Task<Message> {
@@ -1101,6 +1176,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::TrayMenu(open)) => return tray_menu_view(bar, open),
         Some(Surface::Panel) => return panel::view(bar),
         Some(Surface::Calendar) => return agenda::view(bar),
+        Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
         Some(Surface::Catcher) => {
             return mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
