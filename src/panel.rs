@@ -124,7 +124,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             state: bluetooth.label(),
             on: bluetooth.powered,
             message: Message::SetBluetooth(bluetooth.adapter.clone(), !bluetooth.powered),
-            subpanel: None,
+            subpanel: Some(Subpanel::Bluetooth),
         });
     }
     if let Some(audio) = &bar.audio {

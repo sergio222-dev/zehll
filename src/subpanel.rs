@@ -3,7 +3,7 @@ use std::fmt;
 use iced::widget::{Column, Row, Space, Stack, button, column, container, mouse_area, pick_list, row, scrollable, text};
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
-use crate::{BODY_BOLD, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, Message, glow_style, line, mixer, shape, slanted, tray};
+use crate::{BODY_BOLD, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, bluetooth, glow_style, line, mixer, shape, slanted, tray};
 
 const WIDTH: f32 = 420.0;
 const HEIGHT: f32 = 620.0;
@@ -13,6 +13,7 @@ const VOLUME_CELLS: u32 = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Subpanel {
     Audio,
+    Bluetooth,
 }
 
 impl Subpanel {
@@ -20,6 +21,7 @@ impl Subpanel {
     pub fn details(self) -> &'static [&'static str] {
         match self {
             Subpanel::Audio => &["pavucontrol"],
+            Subpanel::Bluetooth => &["kcmshell6", "kcm_bluetooth"],
         }
     }
 }
@@ -27,6 +29,7 @@ impl Subpanel {
 pub fn view(bar: &Bar, subpanel: Subpanel) -> Element<'_, Message> {
     match subpanel {
         Subpanel::Audio => audio(bar),
+        Subpanel::Bluetooth => bluetooth_devices(bar),
     }
 }
 
@@ -161,4 +164,127 @@ fn stream_row<'a>(bar: &'a Bar, stream: &'a mixer::Stream) -> Element<'a, Messag
     });
 
     row![icon, column![label, cells].spacing(6).width(Length::Fill)].spacing(12).align_y(Alignment::Center).into()
+}
+
+fn bluetooth_devices(bar: &Bar) -> Element<'_, Message> {
+    let Some(bluetooth) = &bar.bluetooth else {
+        return frame(bar, "BLUETOOTH DEVICES", String::new(), empty("NO ADAPTER", bar), Subpanel::Bluetooth);
+    };
+    let linked = bluetooth.devices.iter().filter(|device| device.connected).count();
+    let body = if bluetooth.devices.is_empty() {
+        empty("NO PAIRED DEVICES", bar)
+    } else {
+        let cards = Column::with_children(bluetooth.devices.iter().map(|device| device_card(bar, &bluetooth.adapter, device))).spacing(10);
+        scrollable(cards).height(Length::Fill).into()
+    };
+    frame(bar, "BLUETOOTH DEVICES", format!("{linked} / {} LINKED", bluetooth.devices.len()), body, Subpanel::Bluetooth)
+}
+
+fn device_card<'a>(bar: &'a Bar, adapter: &zbus::zvariant::OwnedObjectPath, device: &'a bluetooth::Device) -> Element<'a, Message> {
+    use bluetooth::DeviceAction;
+    let theme = bar.theme;
+    let (block, icon_color) = if device.connected { (theme.accent, theme.on_accent) } else { (theme.section_background, theme.text) };
+    let icon = container(text(device_icon(&device.kind)).font(ICON_FONT).size(20).color(icon_color).shaping(text::Shaping::Advanced))
+        .padding(Padding::ZERO.right(8.0))
+        .center(44);
+    let status = match (device.connected, device.paired) {
+        (true, _) => ("CONNECTED", theme.accent),
+        (false, true) => ("PAIRED", theme.text_muted),
+        (false, false) => ("NOT PAIRED", theme.text_dim),
+    };
+    let mut header = row![
+        slanted(icon, 10.0, block),
+        column![text(&device.alias).font(BODY_BOLD).size(15), text(status.0).font(CONDENSED_BOLD).size(13).color(status.1)].spacing(4).width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center);
+    if let Some(battery) = device.battery {
+        // Battery as a segmented gauge, like the HUD's HP bar.
+        let cells = Row::with_children((1..=10u8).map(|cell| {
+            let color = if cell * 10 <= battery { theme.accent } else { theme.section_background };
+            container(Space::new()).width(5).height(8).style(move |_| container::background(color)).into()
+        }))
+        .spacing(2);
+        header = header.push(column![text(format!("{battery}%")).font(CONDENSED_HEAVY).size(20).color(theme.accent), cells].spacing(4).align_x(Alignment::End));
+    }
+
+    let path = device.path.clone();
+    let actions: Element<'a, Message> = if device.connected {
+        row![
+            outline_button(bar, "FORGET", Message::BluetoothDevice(DeviceAction::Forget { adapter: adapter.clone(), device: path.clone() })),
+            accent_button(bar, "DISCONNECT", Message::BluetoothDevice(DeviceAction::Disconnect(path))),
+        ]
+        .spacing(8)
+        .into()
+    } else {
+        let check = if device.trusted { "check_box" } else { "check_box_outline_blank" };
+        let always = row![text(check).font(ICON_FONT).size(16).shaping(text::Shaping::Advanced), text("ALWAYS CONNECT").font(CONDENSED_BOLD).size(14)]
+            .spacing(8)
+            .align_y(Alignment::Center);
+        let always = button(container(always).padding([0, 12]).center_y(32))
+            .on_press(Message::BluetoothDevice(DeviceAction::Trust(path.clone(), !device.trusted)))
+            .padding(0)
+            .style(move |_, status| glow_style(theme, status, 6.0));
+        let connect = match device.paired {
+            true => accent_button(bar, "CONNECT", Message::BluetoothDevice(DeviceAction::Connect(path))),
+            false => accent_button(bar, "PAIR", Message::BluetoothDevice(DeviceAction::Pair(path))),
+        };
+        row![always, connect].spacing(8).align_y(Alignment::Center).into()
+    };
+
+    let connected = device.connected;
+    container(column![header, container(actions).align_right(Length::Fill)].spacing(12))
+        .padding(12)
+        .width(Length::Fill)
+        .style(move |_| match connected {
+            true => container::Style {
+                background: Some(Color { a: 0.08, ..theme.glow }.into()),
+                border: Border { color: theme.glow, width: 1.0, radius: 0.0.into() },
+                shadow: iced::Shadow { color: Color { a: 0.3, ..theme.glow }, blur_radius: 12.0, ..Default::default() },
+                ..Default::default()
+            },
+            false => container::Style { border: Border { color: theme.border, width: 1.0, radius: 0.0.into() }, ..Default::default() },
+        })
+        .into()
+}
+
+/// Material Symbols name for BlueZ's device icon.
+fn device_icon(kind: &str) -> &'static str {
+    match kind {
+        "audio-headset" | "audio-headphones" => "headphones",
+        "audio-card" => "speaker",
+        "input-mouse" => "mouse",
+        "input-keyboard" => "keyboard",
+        "input-gaming" => "sports_esports",
+        "phone" => "smartphone",
+        "computer" => "computer",
+        _ => "bluetooth",
+    }
+}
+
+fn empty<'a>(label: &'a str, bar: &'a Bar) -> Element<'a, Message> {
+    container(text(label).font(CONDENSED_BOLD).size(16).color(bar.theme.text_muted)).center(Length::Fill).into()
+}
+
+fn outline_button<'a>(bar: &'a Bar, label: &'a str, message: Message) -> Element<'a, Message> {
+    let theme = bar.theme;
+    button(container(text(label).font(CONDENSED_BOLD).size(14)).padding([0, 14]).center_y(32))
+        .on_press(message)
+        .padding(0)
+        .style(move |_, status| {
+            let mut style = glow_style(theme, status, 6.0);
+            if style.border.width == 0.0 {
+                style.border = Border { color: theme.border, width: 1.0, radius: 0.0.into() };
+            }
+            style
+        })
+        .into()
+}
+
+fn accent_button<'a>(bar: &'a Bar, label: &'a str, message: Message) -> Element<'a, Message> {
+    let theme = bar.theme;
+    let label = container(text(label).font(CONDENSED_BOLD).size(14).color(theme.on_accent))
+        .padding(Padding { top: 0.0, right: 24.0, bottom: 0.0, left: 14.0 })
+        .center_y(32);
+    button(slanted(label, 10.0, theme.accent)).on_press(message).padding(0).style(|_, _| button::Style::default()).into()
 }

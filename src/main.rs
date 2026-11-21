@@ -268,6 +268,7 @@ enum Message {
     Mixer(mixer::Mixer),
     SetStreamVolume(u32, u32),
     SetDefaultSink(String),
+    BluetoothDevice(bluetooth::DeviceAction),
 }
 
 fn namespace() -> String {
@@ -497,6 +498,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::SetStreamVolume(index, percent) => return Task::future(mixer::set_volume(index, percent)).discard(),
         Message::SetDefaultSink(name) => return Task::future(mixer::set_default_sink(name)).discard(),
+        Message::BluetoothDevice(action) => return Task::future(bluetooth::run(action)).discard(),
         Message::CalendarMonth(delta) => bar.calendar_month = panel::shift_month(bar.calendar_month, delta),
         Message::ReloadShell => {
             // Start a fresh instance and leave; it takes over the D-Bus names once this one exits.
