@@ -10,6 +10,7 @@ mod nightlight;
 mod panel;
 mod shape;
 mod shortcuts;
+mod state;
 mod system;
 mod theme;
 mod tray;
@@ -102,6 +103,8 @@ struct Bar {
     network: Option<network::Network>,
     bluetooth: Option<bluetooth::Bluetooth>,
     night_light: Option<u32>,
+    // Last state the automatic schedule asked for; a change means a schedule boundary was crossed.
+    night_schedule: Option<bool>,
     // logind idle inhibitor lock held while "keep awake" is on.
     keep_awake: Option<Arc<zbus::zvariant::OwnedFd>>,
 }
@@ -146,9 +149,14 @@ impl Bar {
             network: None,
             bluetooth: None,
             night_light: None,
+            night_schedule: None,
             keep_awake: None,
         };
-        (bar, Task::none())
+        let restore = match state::State::load().keep_awake {
+            true => Task::perform(idle::inhibit(), Message::KeepAwake),
+            false => Task::none(),
+        };
+        (bar, restore)
     }
 
     fn open_menu(&self) -> Option<(Id, &OpenMenu)> {
@@ -234,6 +242,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             if bar.tooltip.is_some() || bar.panel.is_some() {
                 bar.uptime = system::uptime().unwrap_or_default();
+            }
+            // Like ii, apply the schedule at startup and when it changes; manual toggles hold until then.
+            let scheduled = nightlight::scheduled(bar.now.time());
+            if bar.night_schedule != Some(scheduled) {
+                bar.night_schedule = Some(scheduled);
+                return Task::perform(nightlight::set(scheduled), Message::NightLight);
             }
         }
         Message::ActiveWindow(window) => bar.window = window,
@@ -399,8 +413,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.keep_awake.take().is_none() {
                 return Task::perform(idle::inhibit(), Message::KeepAwake);
             }
+            state::State { keep_awake: false }.save();
         }
-        Message::KeepAwake(lock) => bar.keep_awake = lock,
+        Message::KeepAwake(lock) => {
+            bar.keep_awake = lock;
+            state::State { keep_awake: bar.keep_awake.is_some() }.save();
+        }
         Message::SetBluetooth(adapter, powered) => {
             return Task::future(bluetooth::set_powered(adapter, powered)).discard();
         }

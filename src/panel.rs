@@ -121,7 +121,11 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
         toggles.push(Toggle {
             icon: if on { "bedtime" } else { "bedtime_off" },
             name: "Night light",
-            state: if on { format!("ON · {temperature}K") } else { String::from("OFF") },
+            state: {
+                let state = if on { format!("ON · {temperature}K") } else { String::from("OFF") };
+                // "AUTO" while the light follows the schedule, as ii shows it.
+                if bar.night_schedule == Some(on) { format!("AUTO · {state}") } else { state }
+            },
             on,
             message: Message::SetNightLight(!on),
         });

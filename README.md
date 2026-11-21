@@ -45,6 +45,11 @@ layerrule = noanim, ^zehll-panel-catcher$
 
 The power button runs [wlogout](https://github.com/ArtsyMacaw/wlogout).
 
+Quick settings toggle Wi-Fi, Bluetooth, audio output and microphone mute, night light and keep awake:
+
+- Night light switches [hyprsunset](https://github.com/hyprwm/hyprsunset) between 5000 K and 6000 K. It turns on automatically from 19:00 to 06:30; a manual toggle holds until the next change of the schedule.
+- Keep awake holds a logind idle inhibitor, which hypridle honors. It is remembered across restarts in `~/.local/state/zehll/state.json`.
+
 ## Theme
 
 The bar uses a tactical HUD style: a fixed navy base with slanted panels and glowing highlights. Its accent colors come from a Material 3 palette in matugen's `colors.json` format, read from `~/.config/zehll/theme.json` (or `$XDG_CONFIG_HOME/zehll/theme.json`). Missing keys fall back to orange and cyan.
