@@ -27,7 +27,7 @@ Delivery: one commit per phase on the feature branch (ask-on-risk). Test runner:
 | T5b | S7 | inline | done | `feat: show notification popups` |
 | T5c | S7 | inline | done | `feat: add notification actions and images` |
 | T6a | S8 | inline | done | `feat: add a to-do tab to the side panel` |
-| T6b | S8 | inline | pending | |
+| T6b | S8 | inline | done | `feat: add a pomodoro timer tab` |
 
 ## Log
 
@@ -47,3 +47,4 @@ Delivery: one commit per phase on the feature branch (ask-on-risk). Test runner:
 - L14 T5c done: actions (buttons for non-default ones, card click runs `default`, `ActionInvoked` then close), images from `image-data` (RGB/RGBA with rowstride), `image-path` or the app icon via the tray's icon lookup (`tray::lookup`). Capabilities now `actions`, `body`, `body-markup`, `icon-static`. Tests RED then GREEN (16 total). Verified in `dbus-run-session`: raw 8x8 image-data renders, Telegram shows REPLY/MUTE buttons, Firefox shows its theme icon. Not verified: clicking actions (needs real input). Phase 5 complete; using it requires disabling swaync.
 - L15 (2026-11-21) User: "dale" to phase 6. T6 split: T6a tabs + To Do (reads and writes ii's todo.json, re-reading before each change); T6b Timer (pomodoro with ii's values: 25 min focus, 5 min break, 15 min long break every 4 cycles).
 - L16 T6a done: `src/todo.rs` reads and writes ii's todo.json (same JSON shape), re-reading before each change and matching items by index then content; the clock tooltip now reads through it. The tools section has vertical tabs (Calendar, To Do) at a fixed 300 px height. Tests RED then GREEN (19 total). Verified with a temporary XDG_STATE_HOME: adding a task writes `{"content":"Test the timer","done":false}`; the real todo.json was untouched; screenshots of both tabs. Not verified: typing and clicks.
+- L17 T6b done: `src/pomodoro.rs` state machine (ii's 25/5/15 min, long break every 4 focus cycles) advanced by the existing 1 s tick; phase ends send a notification through `org.freedesktop.Notifications` like any client (`notifications::send`). Timer tab with phase strip, cycle count, countdown, progress line and start/pause, reset, skip. Tests RED then GREEN (23 total). Verified in `dbus-run-session` with a temporary 5 s focus: countdown, switch to BREAK cycle 1/4, and a `Focus done` popup. Not verified: button clicks. All side panel tasks (T1-T6) are done; settings sub-panels are the next feature.

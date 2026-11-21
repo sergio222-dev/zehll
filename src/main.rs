@@ -9,6 +9,7 @@ mod network;
 mod nightlight;
 mod notifications;
 mod panel;
+mod pomodoro;
 mod popup;
 mod shape;
 mod shortcuts;
@@ -120,6 +121,7 @@ struct Bar {
     panel_tab: panel::Tab,
     todo_items: Vec<todo::Item>,
     todo_input: String,
+    pomodoro: pomodoro::Pomodoro,
 }
 
 struct Popup {
@@ -179,6 +181,7 @@ impl Bar {
             panel_tab: panel::Tab::Calendar,
             todo_items: Vec::new(),
             todo_input: String::new(),
+            pomodoro: pomodoro::Pomodoro::default(),
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -247,6 +250,9 @@ enum Message {
     AddTodo,
     ToggleTodo(usize, String),
     RemoveTodo(usize, String),
+    TogglePomodoro,
+    ResetPomodoro,
+    SkipPomodoro,
 }
 
 fn namespace() -> String {
@@ -286,6 +292,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             if bar.tooltip.is_some() || bar.panel.is_some() {
                 bar.uptime = system::uptime().unwrap_or_default();
+            }
+            if let Some(finished) = bar.pomodoro.tick(Duration::from_secs(1)) {
+                return pomodoro_finished(finished);
             }
             let now = Instant::now();
             let before = bar.popups.len();
@@ -506,6 +515,11 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
         }
         Message::TodoInput(input) => bar.todo_input = input,
+        Message::TogglePomodoro => bar.pomodoro.running = !bar.pomodoro.running,
+        Message::ResetPomodoro => bar.pomodoro = pomodoro::Pomodoro::default(),
+        Message::SkipPomodoro => {
+            bar.pomodoro.skip();
+        }
         Message::AddTodo => {
             let content = bar.todo_input.trim().to_owned();
             if !content.is_empty() {
@@ -543,6 +557,14 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         _ => {}
     }
     Task::none()
+}
+
+fn pomodoro_finished(finished: pomodoro::Phase) -> Task<Message> {
+    let (summary, body) = match finished {
+        pomodoro::Phase::Focus => ("Focus done", "Time for a break."),
+        pomodoro::Phase::Break | pomodoro::Phase::LongBreak => ("Break over", "Back to focus."),
+    };
+    Task::future(notifications::send(summary, body)).discard()
 }
 
 /// Applies `change` to a fresh read of the todo file, since ii may have edited it meanwhile.

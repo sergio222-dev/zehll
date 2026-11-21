@@ -4,7 +4,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::{
     BODY_BOLD, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, audio, calendar, glow_style, line,
-    BODY_FONT, network, nightlight, notifications, panel_style, shape, slanted, system,
+    BODY_FONT, network, nightlight, notifications, panel_style, pomodoro, shape, slanted, system,
 };
 
 pub const WIDTH: u32 = 460;
@@ -15,6 +15,7 @@ const TOOLS_HEIGHT: f32 = 300.0;
 pub enum Tab {
     Calendar,
     Todo,
+    Timer,
 }
 const PADDING: u16 = 16;
 const DAY_HEIGHT: f32 = 34.0;
@@ -328,11 +329,13 @@ fn tools_view(bar: &Bar) -> Element<'_, Message> {
     let tabs = column![
         tab_button(bar, Tab::Calendar, "calendar_month", "CALENDAR"),
         tab_button(bar, Tab::Todo, "checklist", "TO DO"),
+        tab_button(bar, Tab::Timer, "timer", "TIMER"),
     ]
     .spacing(6);
     let content = match bar.panel_tab {
         Tab::Calendar => calendar_view(bar),
         Tab::Todo => todo_view(bar),
+        Tab::Timer => timer_view(bar),
     };
     let content = container(content).width(Length::Fill).height(TOOLS_HEIGHT);
     container(row![container(tabs).height(TOOLS_HEIGHT).align_bottom(TOOLS_HEIGHT), content].spacing(10))
@@ -410,6 +413,72 @@ fn todo_view(bar: &Bar) -> Element<'_, Message> {
         scrollable(items).height(Length::Fill).into()
     };
     column![input, list].spacing(10).into()
+}
+
+fn timer_view(bar: &Bar) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let timer = &bar.pomodoro;
+    let phase = match timer.phase {
+        pomodoro::Phase::Focus => "FOCUS",
+        pomodoro::Phase::Break => "BREAK",
+        pomodoro::Phase::LongBreak => "LONG BREAK",
+    };
+    let strip = row![
+        text(phase).font(CONDENSED_BOLD).size(16).color(theme.accent),
+        Space::new().width(Length::Fill),
+        text(format!("CYCLE {} / {}", timer.cycle, pomodoro::CYCLES_BEFORE_LONG_BREAK))
+            .font(CONDENSED_BOLD)
+            .size(14)
+            .color(theme.text_muted),
+    ]
+    .align_y(Alignment::Center)
+    .padding([0, 14])
+    .height(30);
+    let strip = slanted(strip, 10.0, theme.section_background);
+
+    let seconds = timer.remaining.as_secs();
+    let clock = text(format!("{:02}:{:02}", seconds / 60, seconds % 60))
+        .font(CONDENSED_HEAVY)
+        .size(72)
+        .color(if timer.running { theme.accent } else { theme.text });
+
+    let progress = 1.0 - timer.remaining.as_secs_f32() / timer.phase.duration().as_secs_f32();
+    let bar_line = Stack::new()
+        .push(line(theme.section_background).height(4))
+        .push(row![
+            line(theme.accent).height(4).width(Length::FillPortion((progress * 1000.0) as u16)),
+            Space::new().width(Length::FillPortion(((1.0 - progress) * 1000.0) as u16)),
+        ]);
+
+    let controls = row![
+        timer_button(bar, if timer.running { "pause" } else { "play_arrow" }, if timer.running { "PAUSE" } else { "START" }, Message::TogglePomodoro),
+        timer_button(bar, "restart_alt", "RESET", Message::ResetPomodoro),
+        timer_button(bar, "skip_next", "SKIP", Message::SkipPomodoro),
+    ]
+    .spacing(8);
+
+    column![strip, container(clock).center_x(Length::Fill).center_y(Length::Fill), bar_line, controls]
+        .spacing(14)
+        .into()
+}
+
+fn timer_button<'a>(bar: &'a Bar, icon: &'a str, label: &'a str, message: Message) -> Element<'a, Message> {
+    let theme = bar.theme;
+    let content = row![crate::icon_sized(icon, 18.0), text(label).font(CONDENSED_BOLD).size(14)]
+        .spacing(6)
+        .align_y(Alignment::Center);
+    button(container(content).center_x(Length::Fill).center_y(36))
+        .on_press(message)
+        .padding(0)
+        .width(Length::Fill)
+        .style(move |_, status| {
+            let mut style = glow_style(theme, status, 8.0);
+            if style.border.width == 0.0 {
+                style.border = iced::Border { color: theme.border, width: 1.0, radius: 0.0.into() };
+            }
+            style
+        })
+        .into()
 }
 
 fn calendar_view(bar: &Bar) -> Element<'_, Message> {
