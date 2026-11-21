@@ -1,3 +1,4 @@
+mod agenda;
 mod audio;
 mod bluetooth;
 mod brightness;
@@ -156,6 +157,10 @@ struct Bar {
     meetings_status: meetings::Status,
     // `gcal.py auth` is waiting for the browser sign-in.
     meetings_signing_in: bool,
+    // Calendar popover and its click catcher.
+    calendar: Option<OpenPanel>,
+    // Day whose agenda the calendar popover shows.
+    calendar_day: NaiveDate,
 }
 
 struct Popup {
@@ -167,6 +172,7 @@ enum Surface {
     Tooltip(Tooltip),
     TrayMenu(OpenMenu),
     Panel,
+    Calendar,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
     Catcher,
@@ -240,6 +246,8 @@ impl Bar {
             meetings: Vec::new(),
             meetings_status: meetings::Status::Ok,
             meetings_signing_in: false,
+            calendar: None,
+            calendar_day: Local::now().date_naive(),
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -348,6 +356,9 @@ enum Message {
     SubmitWifiPassword,
     FetchMeetings,
     SignInMeetings,
+    ToggleCalendar,
+    SelectDay(NaiveDate),
+    OpenMeetingLink(String),
     SignedInMeetings,
     Meetings((NaiveDate, NaiveDate), meetings::Status, Vec<meetings::Meeting>),
 }
@@ -375,6 +386,10 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         true => time::every(Duration::from_millis(150)).map(|_| Message::ScanFrame),
         false => Subscription::none(),
     };
+    let calendar_keys = match bar.calendar {
+        Some(_) => keyboard::listen().map(Message::Key),
+        None => Subscription::none(),
+    };
     let panel = match bar.panel {
         Some(_) => Subscription::batch([
             mixer,
@@ -395,6 +410,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Subscription::run(notifications::events).map(Message::Notifications),
         window::close_events().map(Message::WindowClosed),
         panel,
+        calendar_keys,
     ])
 }
 
@@ -435,7 +451,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::ActiveWindow(window) => bar.window = window,
         Message::ShowTooltip(tooltip) => {
-            if bar.tooltip.is_some() {
+            // The tooltips open under the clock, where the calendar popover is.
+            if bar.tooltip.is_some() || bar.calendar.is_some() {
                 return Task::none();
             }
             // A layer surface instead of an xdg_popup: layershellev grabs the pointer for every
@@ -565,6 +582,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.panel.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
                 return close_panel(bar);
             }
+            if bar.calendar.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
+                return close_calendar(bar);
+            }
         }
         Message::HideTooltip => {
             if let Some(id) = bar.tooltip.take() {
@@ -580,8 +600,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 return open_panel(bar);
             }
         }
-        Message::ClosePanel => return close_panel(bar),
+        // Sent by the click catcher, which both the panel and the calendar popover use.
+        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar)]),
         Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+            if bar.calendar.is_some() {
+                return close_calendar(bar);
+            }
             // Escape closes the sub-panel first, then the panel.
             if bar.subpanel.take().is_none() {
                 return close_panel(bar);
@@ -662,6 +686,23 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return fetch_meetings(bar);
         }
         Message::FetchMeetings => return fetch_meetings(bar),
+        Message::ToggleCalendar => {
+            return if bar.calendar.is_some() { close_calendar(bar) } else { open_calendar(bar) };
+        }
+        Message::SelectDay(day) => {
+            bar.calendar_day = day;
+            let month = panel::first_of_month(day);
+            if month != bar.calendar_month {
+                bar.calendar_month = month;
+                return fetch_meetings(bar);
+            }
+        }
+        Message::OpenMeetingLink(link) => {
+            if let Err(err) = std::process::Command::new("xdg-open").arg(&link).spawn() {
+                eprintln!("zehll: cannot open {link}: {err}");
+            }
+            return close_calendar(bar);
+        }
         Message::SignInMeetings => {
             if !bar.meetings_signing_in {
                 bar.meetings_signing_in = true;
@@ -906,6 +947,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
     let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
+    let close_calendar = close_calendar(bar);
     bar.uptime = system::uptime().unwrap_or_default();
     let month = panel::first_of_month(bar.now.date_naive());
     let fetch = match month == bar.calendar_month {
@@ -917,19 +959,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
     };
     bar.todo_items = todo::load();
 
-    // Layer surfaces have no "click outside" event, so a transparent layer covering the screen
-    // catches those clicks. It is created first so the panel stacks above it.
-    let catcher = NewLayerShellSettings {
-        size: Some((0, 0)),
-        layer: Layer::Overlay,
-        anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
-        exclusive_zone: Some(-1),
-        margin: None,
-        keyboard_interactivity: KeyboardInteractivity::None,
-        output_option: OutputOption::OutputName(output.clone()),
-        events_transparent: false,
-        namespace: Some(String::from("zehll-panel-catcher")),
-    };
+    let catcher = catcher_settings(output.clone(), "zehll-panel-catcher");
     let panel = NewLayerShellSettings {
         size: Some((panel::WIDTH, 0)),
         layer: Layer::Overlay,
@@ -948,7 +978,72 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
         .chain(Task::done(Message::NewLayerShell { settings: panel, id: open.panel }))
         .chain(Task::perform(nightlight::temperature(), Message::NightLight));
     bar.panel = Some(open);
-    Task::batch([task, fetch])
+    Task::batch([close_calendar, task, fetch])
+}
+
+/// Transparent layer covering the screen that catches clicks outside a panel or popover:
+/// layer surfaces have no "click outside" event. Created first so the surface stacks above it.
+fn catcher_settings(output: String, namespace: &str) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((0, 0)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+        exclusive_zone: Some(-1),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::OutputName(output),
+        events_transparent: false,
+        namespace: Some(String::from(namespace)),
+    }
+}
+
+/// Opens the calendar popover under the clock on today, closing the panel and the tooltip.
+fn open_calendar(bar: &mut Bar) -> Task<Message> {
+    let Some(output) = hyprland::focused_monitor() else {
+        return Task::none();
+    };
+    let today = bar.now.date_naive();
+    bar.calendar_day = today;
+    let month = panel::first_of_month(today);
+    let fetch = match month == bar.calendar_month {
+        true => Task::none(),
+        false => {
+            bar.calendar_month = month;
+            fetch_meetings(bar)
+        }
+    };
+    let popover = NewLayerShellSettings {
+        size: Some((agenda::WIDTH, agenda::HEIGHT)),
+        layer: Layer::Overlay,
+        // Anchored only to the top, so it is centered under the clock.
+        anchor: Anchor::Top,
+        exclusive_zone: Some(0),
+        margin: Some((14, 0, 0, 0)),
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::OutputName(output.clone()),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-calendar")),
+    };
+    let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
+    bar.surfaces.insert(open.catcher, Surface::Catcher);
+    bar.surfaces.insert(open.panel, Surface::Calendar);
+    let task = Task::done(Message::NewLayerShell {
+        settings: catcher_settings(output, "zehll-calendar-catcher"),
+        id: open.catcher,
+    })
+    .chain(Task::done(Message::NewLayerShell { settings: popover, id: open.panel }));
+    bar.calendar = Some(open);
+    Task::batch([close_panel(bar), Task::done(Message::HideTooltip), task, fetch])
+}
+
+fn close_calendar(bar: &mut Bar) -> Task<Message> {
+    let Some(open) = bar.calendar.take() else {
+        return Task::none();
+    };
+    Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
 }
 
 fn close_panel(bar: &mut Bar) -> Task<Message> {
@@ -981,6 +1076,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Tooltip(Tooltip::Meeting)) => return meeting_tooltip(bar),
         Some(Surface::TrayMenu(open)) => return tray_menu_view(bar, open),
         Some(Surface::Panel) => return panel::view(bar),
+        Some(Surface::Calendar) => return agenda::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
         Some(Surface::Catcher) => {
             return mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
@@ -1003,7 +1099,16 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
 
     let time = row![
         text(bar.now.format("%H:%M").to_string()).font(CONDENSED_BOLD).size(22),
-        text(bar.now.format("%a %d/%m").to_string().to_uppercase()).font(CONDENSED_BOLD).size(15).color(theme.text_muted),
+        button(text(bar.now.format("%a %d/%m").to_string().to_uppercase()).font(CONDENSED_BOLD).size(15))
+            .on_press(Message::ToggleCalendar)
+            .padding(0)
+            .style(move |_, status| button::Style {
+                text_color: match status {
+                    button::Status::Hovered | button::Status::Pressed => theme.accent,
+                    _ => theme.text_muted,
+                },
+                ..Default::default()
+            }),
     ]
     .spacing(10)
     .align_y(Alignment::Center);

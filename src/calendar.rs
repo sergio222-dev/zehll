@@ -1,6 +1,7 @@
 use chrono::{Datelike, Days, NaiveDate};
 
 pub struct Day {
+    pub date: NaiveDate,
     pub day: u32,
     pub in_month: bool,
 }
@@ -18,8 +19,13 @@ pub fn month_grid(first: NaiveDate) -> Vec<Day> {
     grid_start(first)
         .iter_days()
         .take(GRID_DAYS as usize)
-        .map(|date| Day { day: date.day(), in_month: date.month() == first.month() })
+        .map(|date| Day { date, day: date.day(), in_month: date.month() == first.month() })
         .collect()
+}
+
+/// ISO week number of each of the six rows of the month grid.
+pub fn week_numbers(first: NaiveDate) -> Vec<u32> {
+    grid_start(first).iter_weeks().take(GRID_DAYS as usize / 7).map(|monday| monday.iso_week().week()).collect()
 }
 
 #[cfg(test)]
@@ -48,6 +54,18 @@ mod tests {
         assert!(leading.is_empty());
         assert_eq!(in_month, 30);
         assert_eq!(trailing.len(), 12);
+    }
+
+    #[test]
+    fn grid_days_carry_their_dates_and_iso_weeks() {
+        let first = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let grid = month_grid(first);
+        assert_eq!(grid[0].date, NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+        assert_eq!(grid[41].date, NaiveDate::from_ymd_opt(2026, 12, 6).unwrap());
+        assert_eq!(week_numbers(first), [44, 45, 46, 47, 48, 49]);
+        // December 2026 ends in ISO week 53, then January 2027 restarts at week 1.
+        let december = NaiveDate::from_ymd_opt(2026, 12, 1).unwrap();
+        assert_eq!(week_numbers(december), [49, 50, 51, 52, 53, 1]);
     }
 
     #[test]

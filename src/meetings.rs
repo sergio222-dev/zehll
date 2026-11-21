@@ -181,6 +181,15 @@ pub fn agenda_label(meeting: &Meeting, meetings: &[Meeting], now: NaiveDateTime)
     }
 }
 
+/// Agenda header: `NO MEETINGS`, `1 MEETING`, `3 MEETINGS`.
+pub fn meeting_count(count: usize) -> String {
+    match count {
+        0 => "NO MEETINGS".into(),
+        1 => "1 MEETING".into(),
+        count => format!("{count} MEETINGS"),
+    }
+}
+
 pub fn has_meet_link(meeting: &Meeting) -> bool {
     meeting.link.starts_with("https://meet.google.com/")
 }
@@ -406,6 +415,13 @@ mod tests {
         assert_eq!(ids, ["early", "standup", "review", "sync"]);
         assert!(has_meetings(&meetings, at(22, 0, 0).date()));
         assert!(!has_meetings(&meetings, at(23, 0, 0).date()));
+    }
+
+    #[test]
+    fn meeting_count_header() {
+        assert_eq!(meeting_count(0), "NO MEETINGS");
+        assert_eq!(meeting_count(1), "1 MEETING");
+        assert_eq!(meeting_count(3), "3 MEETINGS");
     }
 
     #[test]
