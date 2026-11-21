@@ -10,6 +10,8 @@ pub enum Kind {
     Brackets { arm: f32, width: f32 },
     /// Line of `thickness` along the bottom edge.
     Underline(f32),
+    /// Diamond with a faint halo filling the bounds, like a glowing status light.
+    Diamond,
 }
 
 impl Kind {
@@ -48,6 +50,19 @@ impl<Message> canvas::Program<Message> for Shape {
             }
             Kind::Underline(thickness) => {
                 frame.fill_rectangle(Point::new(0.0, h - thickness), Size::new(w, thickness), self.color);
+            }
+            Kind::Diamond => {
+                let center = Point::new(w / 2.0, h / 2.0);
+                let diamond = |radius: f32| {
+                    polygon(&[
+                        Point::new(center.x, center.y - radius),
+                        Point::new(center.x + radius, center.y),
+                        Point::new(center.x, center.y + radius),
+                        Point::new(center.x - radius, center.y),
+                    ])
+                };
+                frame.fill(&diamond(w.min(h) / 2.0), Color { a: 0.25, ..self.color });
+                frame.fill(&diamond(w.min(h) * 0.35), self.color);
             }
         }
         vec![frame.into_geometry()]

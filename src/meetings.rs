@@ -2,8 +2,10 @@
 //! pill, its tooltip and the calendar popover are drawn from.
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone};
+use iced::Color;
 use tokio::process::Command;
 
 use crate::calendar;
@@ -40,6 +42,18 @@ pub enum Urgency {
     Imminent,
     /// Token expired.
     Expired,
+}
+
+impl Urgency {
+    /// Dot colour from the Calendar artboard: grey, green, yellow, red.
+    pub fn color(self) -> Color {
+        match self {
+            Urgency::Far => Color::from_rgb8(0x5d, 0x6b, 0x8f),
+            Urgency::Soon => Color::from_rgb8(0x5f, 0xe3, 0x9a),
+            Urgency::Imminent => Color::from_rgb8(0xff, 0xd2, 0x3f),
+            Urgency::Expired => Color::from_rgb8(0xff, 0x4d, 0x5e),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -204,6 +218,20 @@ pub async fn fetch(from: NaiveDate, to: NaiveDate) -> (Status, Vec<Meeting>) {
     (status, parse_events(&String::from_utf8_lossy(&output.stdout), &Local))
 }
 
+/// Time allowed to finish the browser sign-in before `gcal.py auth` is stopped.
+const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Runs `gcal.py auth`, which opens the browser and waits for Google's redirect.
+pub async fn sign_in() {
+    let child = Command::new("python3").args(["-c", GCAL, "auth"]).kill_on_drop(true).status();
+    match tokio::time::timeout(SIGN_IN_TIMEOUT, child).await {
+        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(status)) => eprintln!("zehll: calendar sign-in failed: {status}"),
+        Ok(Err(err)) => eprintln!("zehll: cannot run python3 for the calendar sign-in: {err}"),
+        Err(_) => eprintln!("zehll: calendar sign-in timed out"),
+    }
+}
+
 /// Minutes before the start at which the heads-up notification fires.
 pub const LEAD_MINUTES: i64 = 5;
 /// How long after the start a missed alert card still opens (e.g. after a late fetch).
@@ -352,6 +380,15 @@ mod tests {
         );
         assert_eq!(pill_at(Status::Ok, at(21, 17, 0)), None);
         assert_eq!(pill_at(Status::Error, at(21, 9, 56)), None);
+    }
+
+    #[test]
+    fn urgency_colors_follow_the_artboard() {
+        let rgb = |u: Urgency| u.color().into_rgba8();
+        assert_eq!(rgb(Urgency::Far), [0x5d, 0x6b, 0x8f, 0xff]);
+        assert_eq!(rgb(Urgency::Soon), [0x5f, 0xe3, 0x9a, 0xff]);
+        assert_eq!(rgb(Urgency::Imminent), [0xff, 0xd2, 0x3f, 0xff]);
+        assert_eq!(rgb(Urgency::Expired), [0xff, 0x4d, 0x5e, 0xff]);
     }
 
     #[test]

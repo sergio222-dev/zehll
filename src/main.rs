@@ -49,6 +49,7 @@ const BAR_PADDING: u16 = 16;
 const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 // calendarz's poll interval.
 const MEETINGS_POLL: Duration = Duration::from_secs(120);
+const PILL_BACKGROUND: Color = Color::from_rgb8(0x0d, 0x14, 0x30);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
 const BODY_FONT: Font = Font::with_name("Barlow");
@@ -151,6 +152,8 @@ struct Bar {
     wifi_password: String,
     meetings: Vec<meetings::Meeting>,
     meetings_status: meetings::Status,
+    // `gcal.py auth` is waiting for the browser sign-in.
+    meetings_signing_in: bool,
 }
 
 struct Popup {
@@ -228,6 +231,7 @@ impl Bar {
             wifi_password: String::new(),
             meetings: Vec::new(),
             meetings_status: meetings::Status::Ok,
+            meetings_signing_in: false,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -335,6 +339,8 @@ enum Message {
     WifiPassword(String),
     SubmitWifiPassword,
     FetchMeetings,
+    SignInMeetings,
+    SignedInMeetings,
     Meetings((NaiveDate, NaiveDate), meetings::Status, Vec<meetings::Meeting>),
 }
 
@@ -636,6 +642,16 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return fetch_meetings(bar);
         }
         Message::FetchMeetings => return fetch_meetings(bar),
+        Message::SignInMeetings => {
+            if !bar.meetings_signing_in {
+                bar.meetings_signing_in = true;
+                return Task::perform(meetings::sign_in(), |()| Message::SignedInMeetings);
+            }
+        }
+        Message::SignedInMeetings => {
+            bar.meetings_signing_in = false;
+            return fetch_meetings(bar);
+        }
         Message::Meetings(range, status, meetings) => {
             // A reply for a month no longer shown would drop the meetings of the current one.
             let current = meetings::fetch_range(bar.calendar_month, bar.now.date_naive());
@@ -981,7 +997,8 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     let content = container(
         row![
             container(window).width(Length::FillPortion(1)).clip(true),
-            container(clock).center_x(Length::FillPortion(1)),
+            container(row![clock].push(meeting_pill(bar)).spacing(6).align_y(Alignment::Center))
+                .center_x(Length::FillPortion(1)),
             container(tray_view(bar, id)).align_right(Length::FillPortion(1)),
             // Hovering the right edge opens the side panel, like ii.
             mouse_area(Space::new().width(f32::from(BAR_PADDING)).height(Length::Fill)).on_enter(Message::HoverPanel),
@@ -994,6 +1011,30 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     container(column![content, line(theme.bar_border)])
         .style(move |_| container::background(theme.bar_background))
         .into()
+}
+
+/// Next meeting beside the clock, or `SIGN IN` when the calendar token expired.
+fn meeting_pill(bar: &Bar) -> Option<Element<'_, Message>> {
+    let theme = bar.theme;
+    let pill = meetings::pill(bar.meetings_status, &bar.meetings, bar.now.naive_local())?;
+    let content = row![
+        container(shape(shape::Kind::Diamond, pill.urgency.color())).width(14).height(14),
+        icon_sized("calendar_today", 15.0),
+        text(pill.label).font(CONDENSED_BOLD).size(16),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    let expired = pill.urgency == meetings::Urgency::Expired;
+    let pill = button(container(content).padding([0, 12]).center_y(30))
+        .padding(0)
+        .style(move |_, _| button::Style {
+            background: Some(PILL_BACKGROUND.into()),
+            text_color: theme.text,
+            border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
+            ..Default::default()
+        })
+        .on_press_maybe(expired.then_some(Message::SignInMeetings));
+    Some(pill.into())
 }
 
 fn tray_view(bar: &Bar, bar_id: Id) -> Element<'_, Message> {

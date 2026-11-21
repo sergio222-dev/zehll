@@ -16,8 +16,8 @@ Delivery: one commit per task. Test runner: `cargo test`.
 | T1 | S2 | inline | done | `feat: vendor gcal.py with a date range and end times` |
 | T2 | S1 | inline | done | `feat: add the meetings model and pure helpers` (a856c50) |
 | T8 | S3 | inline | done | `feat: compute due meeting alerts` (5e7d683) |
-| T3 | S1, S2 | inline | done | `feat: fetch meetings from gcal.py` |
-| T4 | S1 | inline | pending | |
+| T3 | S1, S2 | inline | done | `feat: fetch meetings from gcal.py` (820db3b) |
+| T4 | S1 | inline | done (visual check pending) | `feat: show the next meeting pill in the bar` |
 | T5 | S1 | inline | pending | |
 | T6 | S1 | inline | pending | |
 | T9 | S3 | inline | pending | |
@@ -36,3 +36,4 @@ T1 `gcal.py` range + `end`; T2 `meetings.rs` model and pure helpers; T8 `due_ale
 - L4 T2 done: `src/meetings.rs` with `Meeting` (times converted to local `NaiveDateTime` at parse time so helpers stay pure), `Status` from the `gcal.py` exit code, pill (`SIGN IN` on reauth, nothing on error), urgency thresholds, countdown, tooltip, day grouping, agenda states and Meet-link detection. RED 10/10, GREEN `cargo test` 40/40; 17 `dead_code` warnings until T3/T4 wire the module. Assumptions: the pill only looks 24 h ahead (calendarz's old horizon); a meeting in progress reads `NOW` in the agenda; countdowns of a day or more read `IN 2D 3H`; minutes round up. Built with `CARGO_TARGET_DIR` on tmpfs because `/home` was full.
 - L5 T8 done: `due_alerts(meetings, now, fired)` in `src/meetings.rs` returns the `Warning` (start within the next 5 min) and `Start` (from the start up to 5 min late, as calendarz) alerts due at `now`, each once per kind; `fired` keys on kind, id and start, so a rescheduled meeting alerts again. RED 3/3, GREEN `cargo test` 43/43.
 - L6 T3 done: `meetings::fetch` runs the script embedded with `include_str!` through `python3 -c`, so the binary needs no install path; fetched at startup, every 2 min (calendarz's interval), on month change and when the panel reopens on another month. Range: the shown month grid plus today and tomorrow (`fetch_range`; `calendar::grid_start` now shared with `month_grid`). A reply for a range no longer current is dropped; on error the previous meetings and status stay. Fixed a T2 bug: `parse_events` expected a bare array but `gcal.py` prints `{"events": [...]}`. RED 2/2 (parse with the real shape, `fetch_range`), GREEN `cargo test` 44/44. Real check: the embedded script through `python3 -c` with the November grid in RFC 3339 returned exit 0 and 68 events with the same keys as the test.
+- L7 T4 done: `meeting_pill` beside the clock (30 px, `#0d1430` with the border colour, glowing diamond from `shape::Kind::Diamond`, `calendar_today` icon, condensed 16 px label); `Urgency::color` holds the artboard colours. Only `SIGN IN` is clickable: it runs the embedded `gcal.py auth` (browser flow, stopped after 5 min, one at a time) and fetches again. RED 1/1 (`urgency_colors_follow_the_artboard`), GREEN `cargo test` 45/45. Visual check pending: ii (Quickshell) is running and its 63 px `quickshell:bar` layer covers Zehll's bar, so a screenshot showed ii; not stopped without asking.
