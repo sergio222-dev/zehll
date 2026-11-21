@@ -6,7 +6,13 @@ use iced::{Alignment, Border, Color, Element, Length, Padding, Shadow};
 use crate::meetings::{self, Meeting};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, Message, agenda, icon_sized, shape, slanted};
 
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
+
 pub const WIDTH: u32 = 400;
+/// The alert rings again this often while any card is open.
+pub const RING_INTERVAL: Duration = Duration::from_secs(5);
+const RING_SOUND: &str = "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga";
 const CARD_HEIGHT: u32 = 152;
 const SPACING: u32 = 10;
 const RING: Color = Color::from_rgb8(0xff, 0xd2, 0x3f);
@@ -16,6 +22,27 @@ const RING_STATUS: Color = Color::from_rgb8(0xff, 0xd2, 0x7a);
 pub fn height(cards: usize) -> u32 {
     let cards = cards as u32;
     cards * CARD_HEIGHT + SPACING * cards.saturating_sub(1)
+}
+
+/// Plays the alert sound once, stopping the previous ring first: the sound lasts about 6 s,
+/// longer than `RING_INTERVAL`, so rings would otherwise overlap.
+pub fn ring(previous: Option<Child>) -> Option<Child> {
+    stop(previous);
+    match Command::new("pw-play").arg(RING_SOUND).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+        Ok(child) => Some(child),
+        Err(err) => {
+            eprintln!("zehll: cannot play the meeting alert sound: {err}");
+            None
+        }
+    }
+}
+
+/// Stops a ring still playing and reaps its process.
+pub fn stop(ring: Option<Child>) {
+    if let Some(mut child) = ring {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 }
 
 /// The first card is the one ringing; the rest started at the same time.

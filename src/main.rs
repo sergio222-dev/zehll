@@ -163,6 +163,8 @@ struct Bar {
     // Meetings that started and still show an alert card, the ringing one first.
     meeting_alerts: Vec<meetings::Meeting>,
     alert_surface: Option<Id>,
+    // `pw-play` playing the alert sound, stopped before the next ring and when the last card closes.
+    ringing: Option<std::process::Child>,
     // Calendar popover and its click catcher.
     calendar: Option<OpenPanel>,
     // Day whose agenda the calendar popover shows.
@@ -256,6 +258,7 @@ impl Bar {
             meetings_fired: HashSet::new(),
             meeting_alerts: Vec::new(),
             alert_surface: None,
+            ringing: None,
             calendar: None,
             calendar_day: Local::now().date_naive(),
         };
@@ -370,6 +373,7 @@ enum Message {
     SelectDay(NaiveDate),
     OpenMeetingLink(String),
     MeetingTest,
+    RingMeetingAlert,
     DismissMeetingAlert(String, NaiveDateTime),
     JoinMeetingAlert(String, NaiveDateTime),
     SignedInMeetings,
@@ -399,6 +403,10 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         true => time::every(Duration::from_millis(150)).map(|_| Message::ScanFrame),
         false => Subscription::none(),
     };
+    let ring = match bar.meeting_alerts.is_empty() {
+        true => Subscription::none(),
+        false => time::every(alert::RING_INTERVAL).map(|_| Message::RingMeetingAlert),
+    };
     let calendar_keys = match bar.calendar {
         Some(_) => keyboard::listen().map(Message::Key),
         None => Subscription::none(),
@@ -427,6 +435,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         window::close_events().map(Message::WindowClosed),
         panel,
         calendar_keys,
+        ring,
     ])
 }
 
@@ -724,6 +733,11 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             open_link(&link);
             return close_calendar(bar);
         }
+        Message::RingMeetingAlert => {
+            if !bar.meeting_alerts.is_empty() {
+                bar.ringing = alert::ring(bar.ringing.take());
+            }
+        }
         Message::MeetingTest => return show_alert_cards(bar, vec![meetings::test_meeting(bar.now.naive_local())]),
         Message::DismissMeetingAlert(id, start) => {
             bar.meeting_alerts.retain(|meeting| meeting.id != id || meeting.start != start);
@@ -925,6 +939,7 @@ fn show_alert_cards(bar: &mut Bar, started: Vec<meetings::Meeting>) -> Task<Mess
         return Task::none();
     }
     bar.meeting_alerts.extend(started);
+    bar.ringing = alert::ring(bar.ringing.take());
     // The cards open where the calendar popover is.
     Task::batch([close_calendar(bar), sync_alert_cards(bar)])
 }
@@ -938,6 +953,9 @@ fn open_link(link: &str) {
 
 /// Opens, resizes or closes the alert card surface, centered under the clock.
 fn sync_alert_cards(bar: &mut Bar) -> Task<Message> {
+    if bar.meeting_alerts.is_empty() {
+        alert::stop(bar.ringing.take());
+    }
     let height = alert::height(bar.meeting_alerts.len());
     match (bar.alert_surface, height) {
         (Some(id), 0) => {
