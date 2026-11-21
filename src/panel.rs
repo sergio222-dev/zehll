@@ -4,7 +4,7 @@ use iced::{Alignment, Element, Length, Padding};
 
 use crate::{
     BODY_BOLD, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, audio, calendar, glow_style, line,
-    network, panel_style, shape, slanted, system,
+    network, nightlight, panel_style, shape, slanted, system,
 };
 
 pub const WIDTH: u32 = 460;
@@ -70,7 +70,7 @@ struct Toggle {
     message: Message,
 }
 
-fn quick_settings(bar: &Bar) -> Option<Element<'_, Message>> {
+fn quick_settings(bar: &Bar) -> Element<'_, Message> {
     let theme = bar.theme;
     let mut toggles = Vec::new();
     if let Some(network) = &bar.network {
@@ -116,9 +116,24 @@ fn quick_settings(bar: &Bar) -> Option<Element<'_, Message>> {
             message: Message::ToggleMute(audio::INPUT),
         });
     }
-    if toggles.is_empty() {
-        return None;
+    if let Some(temperature) = bar.night_light {
+        let on = nightlight::is_on(temperature);
+        toggles.push(Toggle {
+            icon: if on { "bedtime" } else { "bedtime_off" },
+            name: "Night light",
+            state: if on { format!("ON · {temperature}K") } else { String::from("OFF") },
+            on,
+            message: Message::SetNightLight(!on),
+        });
     }
+    let keep_awake = bar.keep_awake.is_some();
+    toggles.push(Toggle {
+        icon: "coffee",
+        name: "Keep awake",
+        state: String::from(if keep_awake { "ACTIVE" } else { "OFF" }),
+        on: keep_awake,
+        message: Message::ToggleKeepAwake,
+    });
 
     let on = toggles.iter().filter(|toggle| toggle.on).count();
     let strip = row![
@@ -137,7 +152,7 @@ fn quick_settings(bar: &Bar) -> Option<Element<'_, Message>> {
         let second = tiles.next().unwrap_or_else(|| Space::new().width(Length::Fill).into());
         grid = grid.push(row![first, second].spacing(8));
     }
-    Some(column![strip, grid].spacing(8).into())
+    column![strip, grid].spacing(8).into()
 }
 
 fn tile(bar: &Bar, toggle: Toggle) -> Element<'_, Message> {

@@ -3,8 +3,10 @@ mod bluetooth;
 mod calendar;
 mod dbus;
 mod hyprland;
+mod idle;
 mod menu;
 mod network;
+mod nightlight;
 mod panel;
 mod shape;
 mod shortcuts;
@@ -99,6 +101,9 @@ struct Bar {
     audio: Option<audio::Audio>,
     network: Option<network::Network>,
     bluetooth: Option<bluetooth::Bluetooth>,
+    night_light: Option<u32>,
+    // logind idle inhibitor lock held while "keep awake" is on.
+    keep_awake: Option<Arc<zbus::zvariant::OwnedFd>>,
 }
 
 enum Surface {
@@ -140,6 +145,8 @@ impl Bar {
             audio: None,
             network: None,
             bluetooth: None,
+            night_light: None,
+            keep_awake: None,
         };
         (bar, Task::none())
     }
@@ -185,6 +192,10 @@ enum Message {
     SetWifi(bool),
     Bluetooth(bluetooth::Bluetooth),
     SetBluetooth(zbus::zvariant::OwnedObjectPath, bool),
+    NightLight(Option<u32>),
+    SetNightLight(bool),
+    ToggleKeepAwake,
+    KeepAwake(Option<Arc<zbus::zvariant::OwnedFd>>),
 }
 
 fn namespace() -> String {
@@ -381,6 +392,15 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::Network(network) => bar.network = Some(network),
         Message::SetWifi(enabled) => return Task::future(network::set_wifi(enabled)).discard(),
         Message::Bluetooth(bluetooth) => bar.bluetooth = Some(bluetooth),
+        Message::NightLight(temperature) => bar.night_light = temperature,
+        Message::SetNightLight(on) => return Task::perform(nightlight::set(on), Message::NightLight),
+        Message::ToggleKeepAwake => {
+            // Dropping the lock releases the inhibitor.
+            if bar.keep_awake.take().is_none() {
+                return Task::perform(idle::inhibit(), Message::KeepAwake);
+            }
+        }
+        Message::KeepAwake(lock) => bar.keep_awake = lock,
         Message::SetBluetooth(adapter, powered) => {
             return Task::future(bluetooth::set_powered(adapter, powered)).discard();
         }
@@ -437,7 +457,8 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
     bar.surfaces.insert(open.catcher, Surface::Catcher);
     bar.surfaces.insert(open.panel, Surface::Panel);
     let task = Task::done(Message::NewLayerShell { settings: catcher, id: open.catcher })
-        .chain(Task::done(Message::NewLayerShell { settings: panel, id: open.panel }));
+        .chain(Task::done(Message::NewLayerShell { settings: panel, id: open.panel }))
+        .chain(Task::perform(nightlight::temperature(), Message::NightLight));
     bar.panel = Some(open);
     task
 }
