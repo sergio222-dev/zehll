@@ -13,12 +13,12 @@ Delivery: one commit per task. Test runner: `cargo test`.
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| T1 | S2 | inline | done | `feat: vendor gcal.py with a date range and end times` |
+| T1 | S2 | inline | done | `feat: vendor gcal.py with a date range and end times` (9ba634e) |
 | T2 | S1 | inline | done | `feat: add the meetings model and pure helpers` (a856c50) |
 | T8 | S3 | inline | done | `feat: compute due meeting alerts` (5e7d683) |
 | T3 | S1, S2 | inline | done | `feat: fetch meetings from gcal.py` (820db3b) |
-| T4 | S1 | inline | done (visual check pending) | `feat: show the next meeting pill in the bar` |
-| T5 | S1 | inline | pending | |
+| T4 | S1 | inline | done (visual check pending) | `feat: show the next meeting pill in the bar` (8afb933) |
+| T5 | S1 | inline | done (visual check pending) | `feat: show the meeting tooltip on the pill` |
 | T6 | S1 | inline | pending | |
 | T9 | S3 | inline | pending | |
 | T10 | S3 | inline | pending | |
@@ -37,3 +37,5 @@ T1 `gcal.py` range + `end`; T2 `meetings.rs` model and pure helpers; T8 `due_ale
 - L5 T8 done: `due_alerts(meetings, now, fired)` in `src/meetings.rs` returns the `Warning` (start within the next 5 min) and `Start` (from the start up to 5 min late, as calendarz) alerts due at `now`, each once per kind; `fired` keys on kind, id and start, so a rescheduled meeting alerts again. RED 3/3, GREEN `cargo test` 43/43.
 - L6 T3 done: `meetings::fetch` runs the script embedded with `include_str!` through `python3 -c`, so the binary needs no install path; fetched at startup, every 2 min (calendarz's interval), on month change and when the panel reopens on another month. Range: the shown month grid plus today and tomorrow (`fetch_range`; `calendar::grid_start` now shared with `month_grid`). A reply for a range no longer current is dropped; on error the previous meetings and status stay. Fixed a T2 bug: `parse_events` expected a bare array but `gcal.py` prints `{"events": [...]}`. RED 2/2 (parse with the real shape, `fetch_range`), GREEN `cargo test` 44/44. Real check: the embedded script through `python3 -c` with the November grid in RFC 3339 returned exit 0 and 68 events with the same keys as the test.
 - L7 T4 done: `meeting_pill` beside the clock (30 px, `#0d1430` with the border colour, glowing diamond from `shape::Kind::Diamond`, `calendar_today` icon, condensed 16 px label); `Urgency::color` holds the artboard colours. Only `SIGN IN` is clickable: it runs the embedded `gcal.py auth` (browser flow, stopped after 5 min, one at a time) and fetches again. RED 1/1 (`urgency_colors_follow_the_artboard`), GREEN `cargo test` 45/45. Visual check pending: ii (Quickshell) is running and its 63 px `quickshell:bar` layer covers Zehll's bar, so a screenshot showed ii; not stopped without asking.
+- L8 T4 visual check (ii stopped and restarted with the user's OK): Zehll's bar renders the clock with no pill, which is correct: `gcal.py events` for the next 24 h returned exit 0 and 0 events (next meeting Monday 2026-11-23 10:30). The pill itself is still unseen; T12's test trigger or Monday's meetings will show it.
+- L9 T5 done: `Surface::Tooltip` now carries `Tooltip::Clock` or `Tooltip::Meeting`, so the pill reuses the clock's overlay layer surface (centered under the bar, so under the clock and pill group). `meeting_tooltip` shows the title and `meetings::tooltip` (`10:00 – 10:45 · IN 4 MIN`, accent), 300×56, long titles clipped; no tooltip on `SIGN IN`. `Tick` hides it when the meeting starts under the pointer (the pill disappears without a pointer exit). No new pure logic (the text is pinned by T2's `tooltip_text`), so no RED; `cargo build` and `cargo test` 45/45. Visual check pending: no meeting in the next 24 h, so no pill to hover; T12's test trigger will show it.

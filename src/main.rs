@@ -65,6 +65,8 @@ const TOOLTIP_ROW_HEIGHT: u32 = 38;
 const TOOLTIP_STRIP_HEIGHT: u32 = 28;
 const TOOLTIP_LINE_HEIGHT: u32 = 20;
 const TOOLTIP_LIST_PADDING: (u16, u16) = (8, 14);
+// Two 13 px lines with 8 px padding; long titles are clipped.
+const MEETING_TOOLTIP_SIZE: (u32, u32) = (300, 56);
 
 pub fn main() -> Result<(), iced_layershell::Error> {
     daemon(Bar::new, namespace, update, view)
@@ -162,12 +164,18 @@ struct Popup {
 }
 
 enum Surface {
-    Tooltip,
+    Tooltip(Tooltip),
     TrayMenu(OpenMenu),
     Panel,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
     Catcher,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tooltip {
+    Clock,
+    Meeting,
 }
 
 struct OpenMenu {
@@ -276,7 +284,7 @@ impl Bar {
 enum Message {
     Tick,
     ActiveWindow(hyprland::ActiveWindow),
-    ShowTooltip,
+    ShowTooltip(Tooltip),
     HideTooltip,
     Tray(tray::TrayEvent),
     ActivateTray(String),
@@ -402,6 +410,13 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.tooltip.is_some() || bar.panel.is_some() {
                 bar.uptime = system::uptime().unwrap_or_default();
             }
+            // The pill disappears under the pointer when its meeting starts, without a pointer exit.
+            let meeting_tooltip = bar.tooltip.and_then(|id| bar.surfaces.get(&id));
+            if matches!(meeting_tooltip, Some(Surface::Tooltip(Tooltip::Meeting)))
+                && meetings::next_meeting(&bar.meetings, bar.now.naive_local()).is_none()
+            {
+                return Task::done(Message::HideTooltip);
+            }
             if let Some(finished) = bar.pomodoro.tick(Duration::from_secs(1)) {
                 return pomodoro_finished(finished);
             }
@@ -419,7 +434,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
         }
         Message::ActiveWindow(window) => bar.window = window,
-        Message::ShowTooltip => {
+        Message::ShowTooltip(tooltip) => {
             if bar.tooltip.is_some() {
                 return Task::none();
             }
@@ -429,17 +444,22 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let Some(output) = hyprland::focused_monitor() else {
                 return Task::none();
             };
-            bar.uptime = system::uptime().unwrap_or_default();
-            bar.todos = system::pending_todos();
-
             // The surface needs a fixed size, and every block of the tooltip has a fixed height.
-            let (list_top, list_bottom) = TOOLTIP_LIST_PADDING;
-            let list = bar.todos.lines.len() as u32 * TOOLTIP_LINE_HEIGHT + list_top as u32 + list_bottom as u32;
-            let height = TOOLTIP_HEADER_HEIGHT + 2 + TOOLTIP_ROW_HEIGHT + TOOLTIP_STRIP_HEIGHT + list + 2;
+            let size = match tooltip {
+                Tooltip::Clock => {
+                    bar.uptime = system::uptime().unwrap_or_default();
+                    bar.todos = system::pending_todos();
+                    let (list_top, list_bottom) = TOOLTIP_LIST_PADDING;
+                    let list =
+                        bar.todos.lines.len() as u32 * TOOLTIP_LINE_HEIGHT + list_top as u32 + list_bottom as u32;
+                    (TOOLTIP_WIDTH, TOOLTIP_HEADER_HEIGHT + 2 + TOOLTIP_ROW_HEIGHT + TOOLTIP_STRIP_HEIGHT + list + 2)
+                }
+                Tooltip::Meeting => MEETING_TOOLTIP_SIZE,
+            };
             let settings = NewLayerShellSettings {
-                size: Some((TOOLTIP_WIDTH, height)),
+                size: Some(size),
                 layer: Layer::Overlay,
-                // Anchored only to the top, so it is centered under the clock.
+                // Anchored only to the top, so it is centered under the clock and the meeting pill.
                 anchor: Anchor::Top,
                 exclusive_zone: Some(0),
                 margin: Some((8, 0, 0, 0)),
@@ -451,7 +471,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
 
             let id = Id::unique();
             bar.tooltip = Some(id);
-            bar.surfaces.insert(id, Surface::Tooltip);
+            bar.surfaces.insert(id, Surface::Tooltip(tooltip));
             return Task::done(Message::NewLayerShell { settings, id });
         }
         Message::Tray(tray::TrayEvent::Ready(client)) => bar.tray_client = Some(client),
@@ -957,7 +977,8 @@ fn activate_tray(bar: &Bar, request: ActivateRequest) -> Task<Message> {
 
 fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     match bar.surfaces.get(&id) {
-        Some(Surface::Tooltip) => return clock_tooltip(bar),
+        Some(Surface::Tooltip(Tooltip::Clock)) => return clock_tooltip(bar),
+        Some(Surface::Tooltip(Tooltip::Meeting)) => return meeting_tooltip(bar),
         Some(Surface::TrayMenu(open)) => return tray_menu_view(bar, open),
         Some(Surface::Panel) => return panel::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
@@ -991,7 +1012,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         .push(shape(shape::Kind::Underline(2.0), theme.accent));
     // The hover area spans the full bar height so the tooltip is easy to trigger.
     let clock = mouse_area(container(time).padding([0, 18]).center_y(Length::Fill))
-        .on_enter(Message::ShowTooltip)
+        .on_enter(Message::ShowTooltip(Tooltip::Clock))
         .on_exit(Message::HideTooltip);
 
     let content = container(
@@ -1034,7 +1055,32 @@ fn meeting_pill(bar: &Bar) -> Option<Element<'_, Message>> {
             ..Default::default()
         })
         .on_press_maybe(expired.then_some(Message::SignInMeetings));
-    Some(pill.into())
+    if expired {
+        return Some(pill.into());
+    }
+    Some(mouse_area(pill).on_enter(Message::ShowTooltip(Tooltip::Meeting)).on_exit(Message::HideTooltip).into())
+}
+
+/// Title and `10:00 – 10:45 · IN 4 MIN` of the meeting shown in the pill.
+fn meeting_tooltip(bar: &Bar) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let now = bar.now.naive_local();
+    let content: Element<'_, Message> = match meetings::next_meeting(&bar.meetings, now) {
+        Some(meeting) => column![
+            text(&meeting.title).font(BODY_BOLD).size(13).wrapping(text::Wrapping::None),
+            text(meetings::tooltip(meeting, now)).font(CONDENSED).size(13).color(theme.accent),
+        ]
+        .spacing(2)
+        .into(),
+        None => Space::new().into(),
+    };
+    container(content)
+        .padding([8, 12])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .clip(true)
+        .style(move |_| panel_style(theme))
+        .into()
 }
 
 fn tray_view(bar: &Bar, bar_id: Id) -> Element<'_, Message> {
