@@ -4,6 +4,10 @@ use tokio::process::Command;
 /// Temperatures ii uses for night light on and off, so both shells agree on the state.
 pub const NIGHT: u32 = 5000;
 pub const DAY: u32 = 6000;
+/// Warmest temperature the intensity slider offers.
+pub const WARMEST: u32 = 2500;
+/// hyprsunset rejects lower gamma, which ii also uses as its floor.
+pub const GAMMA_MIN: u32 = 25;
 /// Automatic schedule, inclusive on both ends like ii's: (hour, minute).
 const FROM: (u32, u32) = (19, 0);
 const TO: (u32, u32) = (6, 30);
@@ -30,14 +34,29 @@ pub async fn temperature() -> Option<u32> {
     parse_temperature(&String::from_utf8_lossy(&output.stdout))
 }
 
-/// Switches night light and returns the temperature hyprsunset reports afterwards.
-pub async fn set(on: bool) -> Option<u32> {
-    let temperature = if on { NIGHT } else { DAY };
-    let status = Command::new("hyprctl").args(["hyprsunset", "temperature", &temperature.to_string()]).status().await;
-    if let Err(err) = status {
-        eprintln!("zehll: cannot set night light: {err}");
-    }
+/// Switches night light, using `night` kelvin when on, and returns the temperature hyprsunset
+/// reports afterwards.
+pub async fn set(on: bool, night: u32) -> Option<u32> {
+    let temperature = if on { night } else { DAY };
+    hyprsunset(&["temperature", &temperature.to_string()]).await;
     self::temperature().await
+}
+
+/// Current hyprsunset gamma in percent.
+pub async fn gamma() -> Option<u32> {
+    let output = Command::new("hyprctl").args(["hyprsunset", "gamma"]).output().await.ok()?;
+    parse_temperature(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub async fn set_gamma(percent: u32) -> Option<u32> {
+    hyprsunset(&["gamma", &percent.max(GAMMA_MIN).to_string()]).await;
+    gamma().await
+}
+
+async fn hyprsunset(args: &[&str]) {
+    if let Err(err) = Command::new("hyprctl").arg("hyprsunset").args(args).status().await {
+        eprintln!("zehll: hyprctl hyprsunset {} failed: {err}", args.join(" "));
+    }
 }
 
 #[cfg(test)]

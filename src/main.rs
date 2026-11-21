@@ -1,7 +1,9 @@
 mod audio;
 mod bluetooth;
+mod brightness;
 mod calendar;
 mod dbus;
+mod flashbang;
 mod hyprland;
 mod idle;
 mod menu;
@@ -133,6 +135,13 @@ struct Bar {
     sink_picker_open: bool,
     // Animation step of the scanning indicator.
     scan_frame: u8,
+    night_temperature: u32,
+    night_automatic: bool,
+    content_adjustment: bool,
+    gamma: Option<u32>,
+    brightness: Option<brightness::Monitor>,
+    // Slider being dragged in the eye protection sub-panel and its value.
+    level_drag: Option<(subpanel::Level, u32)>,
     wifi: Option<network::Wifi>,
     // SSID asking for a password in the Wi-Fi sub-panel.
     wifi_prompt: Option<String>,
@@ -203,6 +212,12 @@ impl Bar {
             volume_drag: None,
             sink_picker_open: false,
             scan_frame: 0,
+            night_temperature: state.night_temperature,
+            night_automatic: state.night_automatic,
+            content_adjustment: state.content_adjustment,
+            gamma: None,
+            brightness: None,
+            level_drag: None,
             wifi: None,
             wifi_prompt: None,
             wifi_password: String::new(),
@@ -211,11 +226,23 @@ impl Bar {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
             false => Task::none(),
         };
+        // Runtime Hyprland options are gone after a restart, so reapply the shader.
+        let restore = match state.content_adjustment {
+            true => restore.chain(Task::perform(flashbang::set(true), Message::ContentAdjustment)),
+            false => restore,
+        };
         (bar, restore)
     }
 
     fn save_state(&self) {
-        state::State { keep_awake: self.keep_awake.is_some(), do_not_disturb: self.do_not_disturb }.save();
+        state::State {
+            keep_awake: self.keep_awake.is_some(),
+            do_not_disturb: self.do_not_disturb,
+            night_temperature: self.night_temperature,
+            night_automatic: self.night_automatic,
+            content_adjustment: self.content_adjustment,
+        }
+        .save();
     }
 
     fn open_menu(&self) -> Option<(Id, &OpenMenu)> {
@@ -286,6 +313,13 @@ enum Message {
     ReleaseStreamVolume,
     ToggleSinkPicker,
     ScanFrame,
+    ToggleNightAutomatic,
+    ContentAdjustment(bool),
+    SetContentAdjustment(bool),
+    Gamma(Option<u32>),
+    Brightness(Option<brightness::Monitor>),
+    DragLevel(subpanel::Level, u32),
+    ReleaseLevel,
     SetDefaultSink(String),
     BluetoothDevice(bluetooth::DeviceAction),
     Wifi(network::Wifi),
@@ -362,9 +396,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             // Like ii, apply the schedule at startup and when it changes; manual toggles hold until then.
             let scheduled = nightlight::scheduled(bar.now.time());
-            if bar.night_schedule != Some(scheduled) {
+            if bar.night_automatic && bar.night_schedule != Some(scheduled) {
                 bar.night_schedule = Some(scheduled);
-                return Task::perform(nightlight::set(scheduled), Message::NightLight);
+                return Task::perform(nightlight::set(scheduled, bar.night_temperature), Message::NightLight);
             }
         }
         Message::ActiveWindow(window) => bar.window = window,
@@ -520,6 +554,14 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             bar.subpanel = Some(subpanel);
             bar.wifi_prompt = None;
             bar.sink_picker_open = false;
+            if subpanel == subpanel::Subpanel::EyeProtection {
+                let output = hyprland::focused_monitor().unwrap_or_default();
+                return Task::batch([
+                    Task::perform(nightlight::gamma(), Message::Gamma),
+                    Task::perform(flashbang::is_enabled(), Message::ContentAdjustment),
+                    Task::perform(brightness::read(output), Message::Brightness),
+                ]);
+            }
         }
         Message::CloseSubpanel => bar.subpanel = None,
         Message::SubpanelDetails(subpanel) => {
@@ -592,7 +634,45 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::SetWifi(enabled) => return Task::future(network::set_wifi(enabled)).discard(),
         Message::Bluetooth(bluetooth) => bar.bluetooth = Some(bluetooth),
         Message::NightLight(temperature) => bar.night_light = temperature,
-        Message::SetNightLight(on) => return Task::perform(nightlight::set(on), Message::NightLight),
+        Message::SetNightLight(on) => return Task::perform(nightlight::set(on, bar.night_temperature), Message::NightLight),
+        Message::ToggleNightAutomatic => {
+            bar.night_automatic = !bar.night_automatic;
+            // Re-evaluate the schedule on the next tick when automatic mode comes back.
+            bar.night_schedule = None;
+            bar.save_state();
+        }
+        Message::ContentAdjustment(enabled) => bar.content_adjustment = enabled,
+        Message::SetContentAdjustment(enabled) => {
+            bar.content_adjustment = enabled;
+            bar.save_state();
+            return Task::perform(flashbang::set(enabled), Message::ContentAdjustment);
+        }
+        Message::Gamma(gamma) => bar.gamma = gamma,
+        Message::Brightness(monitor) => bar.brightness = monitor,
+        Message::DragLevel(level, value) => bar.level_drag = Some((level, value)),
+        Message::ReleaseLevel => {
+            // Like the volume sliders, apply once on release: these commands are slow.
+            let Some((level, value)) = bar.level_drag.take() else {
+                return Task::none();
+            };
+            match level {
+                subpanel::Level::Temperature => {
+                    bar.night_temperature = value;
+                    bar.save_state();
+                    if bar.night_light.is_some_and(nightlight::is_on) {
+                        return Task::perform(nightlight::set(true, value), Message::NightLight);
+                    }
+                }
+                subpanel::Level::Gamma => return Task::perform(nightlight::set_gamma(value), Message::Gamma),
+                subpanel::Level::Brightness => {
+                    let Some(monitor) = &mut bar.brightness else {
+                        return Task::none();
+                    };
+                    monitor.percent = value;
+                    return Task::future(brightness::set(monitor.clone(), value)).discard();
+                }
+            }
+        }
         Message::ToggleKeepAwake => {
             // Dropping the lock releases the inhibitor.
             if bar.keep_awake.take().is_none() {

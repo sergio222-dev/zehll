@@ -158,7 +158,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             },
             on,
             message: Message::SetNightLight(!on),
-            subpanel: None,
+            subpanel: Some(Subpanel::EyeProtection),
         });
     }
     let keep_awake = bar.keep_awake.is_some();

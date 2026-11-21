@@ -8,6 +8,7 @@ Delivery: one commit per sub-panel. Test runner: `cargo test`.
 - S1 "para la red al hacer click aparece esta sub panel flotante, para elegir red, en details abre una interfaz de wifi". Details runs ii's `kcmshell6 kcm_networkmanagement`.
 - S2 "en bluetooth muesta ese subpanel flotante, en detail tambien abre una interfaz de bluetooth". Details runs ii's `kcmshell6 kcm_bluetooth`.
 - S3 "el audio, detail abre pulseaudio control". Details runs `pavucontrol`.
+- S5 "el boton de nightlight tiene el siguiente subpanel" (Eye protection: night light enable, automatic, intensity; anti-flashbang; brightness; gamma), artboard EyeProtection.
 - S4 Opening: "no se abren los sub paneles al hacer click en los quicksettings, deberia abrir el subpanel". Clicking a tile's icon toggles; clicking the rest of the tile (or right-clicking) opens its sub-panel; tiles without a sub-panel toggle anywhere. Sub-panels float over the dimmed panel inside the panel surface; DONE, Escape or a click outside closes them.
 - Constraint: data is read only while a sub-panel is open.
 
@@ -18,6 +19,7 @@ Delivery: one commit per sub-panel. Test runner: `cargo test`.
 | T1 | S3, S4 | inline | done | `feat: add the audio sub-panel` |
 | T2 | S2 | inline | done | `feat: add the Bluetooth sub-panel` |
 | T3 | S1 | inline | done | `feat: add the Wi-Fi sub-panel` |
+| T4 | S5 | inline | done | `feat: add the eye protection sub-panel` |
 
 ## Log
 
@@ -31,3 +33,4 @@ Delivery: one commit per sub-panel. Test runner: `cargo test`.
 - L8 (2026-11-21) User: "en la lista para elegir dispositivo de audio se resalta el que esta elegido pero al hacer hover eso cambia, el hover deberia tener un resaltado mas lijero". Cause: iced's pick_list menu has one highlight style shared by the hovered option. Replaced it with an inline list: the chosen device has a strong accent block and is listed first; hovering others adds only the light glow; names stay on one line. Verified by screenshot with the list open; hover not verifiable here.
 - L9 (2026-11-21) User: "deberia haber un indicador de carga cuando esta scaneando por bluetooth o red". Wi-Fi: remember `LastScan` before `RequestScan`; scanning until it changes (15 s cap for refused scans). Bluetooth: the sub-panel now runs `StartDiscovery` on its own connection, held by a subscription, so closing it ends discovery; scanning comes from the adapter's `Discovering`. The strip shows "SCANNING" with four blocks animated by a 150 ms timer that runs only while scanning. Test RED then GREEN (28 total). Verified: Discovering true while the Bluetooth sub-panel is open and false after Zehll exits; Wi-Fi shows SCANNING then "10 FOUND".
 - L10 (2026-11-21) User: "listo la primer tanda de subpaneles esta completa". First batch (Wi-Fi, Bluetooth, audio) closed.
+- L11 (2026-11-21) Second batch: eye protection sub-panel, "se ve bien a implementar". Night light intensity (2500–6000 K) and the automatic schedule switch are persisted in state.json; gamma via `hyprctl hyprsunset gamma` (min 25); brightness over DDC/CI with ddcutil for the panel's monitor (`src/brightness.rs`, 0.3 s per call, applied on slider release); content adjustment loads Zehll's own anti-flashbang shader (`assets/anti-flashbang.glsl`, 16 samples, not ii's GPL shader) through `hyprctl eval 'hl.config(...)'` and is reapplied at startup. ii's brightness adjustment (screenshot + ImageMagick on every window change) is not implemented yet: pending the user's decision. Parser tests RED then GREEN (30 total). Verified: Hyprland loads the shader without errors and it was turned off again; screenshot shows real values (ON · 5000K, brightness 20% from DDC, gamma 100%). Not verified: slider and switch interaction.
