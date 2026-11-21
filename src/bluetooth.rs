@@ -22,6 +22,8 @@ pub struct Bluetooth {
     pub powered: bool,
     /// Alias of a connected device.
     pub device: Option<String>,
+    /// The adapter is searching for devices.
+    pub discovering: bool,
     /// Every device BlueZ knows, like ii: connected, then paired, then the rest.
     pub devices: Vec<Device>,
 }
@@ -141,6 +143,27 @@ pub fn events() -> impl Stream<Item = Bluetooth> {
     })
 }
 
+/// Searches for devices while the stream is alive. BlueZ ties discovery to the D-Bus client that
+/// started it, so dropping the stream (closing the sub-panel) ends the search.
+pub fn discover() -> impl Stream<Item = ()> {
+    stream::channel(1, async |_output| {
+        let result = async {
+            let connection = Connection::system().await?;
+            let Some(bluetooth) = read(&connection).await else {
+                return zbus::Result::Ok(None);
+            };
+            dbus::proxy(&connection, SERVICE, bluetooth.adapter.as_str(), ADAPTER).await?.call_method("StartDiscovery", &()).await?;
+            Ok(Some(connection))
+        };
+        match result.await {
+            // Hold the connection until the subscription is dropped.
+            Ok(Some(_connection)) => std::future::pending::<()>().await,
+            Ok(None) => {}
+            Err(err) => eprintln!("zehll: cannot start Bluetooth discovery: {err}"),
+        }
+    })
+}
+
 pub async fn set_powered(adapter: OwnedObjectPath, powered: bool) {
     let result = async {
         let connection = Connection::system().await?;
@@ -178,7 +201,7 @@ fn summarize(objects: &ManagedObjects) -> Option<Bluetooth> {
         .min_by_key(|(path, _)| path.as_str())?;
     let devices = devices(objects);
     let device = devices.iter().find(|device| device.connected).map(|device| device.alias.clone());
-    Some(Bluetooth { adapter: adapter.clone(), powered: flag(properties, "Powered"), device, devices })
+    Some(Bluetooth { adapter: adapter.clone(), powered: flag(properties, "Powered"), discovering: flag(properties, "Discovering"), device, devices })
 }
 
 #[cfg(test)]
@@ -233,7 +256,10 @@ mod tests {
         );
         headset.extend(object("org.bluez.Battery1", &[("Percentage", value(80u8.into()))]));
         let objects = ManagedObjects::from([
-            (path("/org/bluez/hci0"), object("org.bluez.Adapter1", &[("Powered", value(true.into()))])),
+            (
+                path("/org/bluez/hci0"),
+                object("org.bluez.Adapter1", &[("Powered", value(true.into())), ("Discovering", value(true.into()))]),
+            ),
             (
                 path("/org/bluez/hci0/dev_A"),
                 object("org.bluez.Device1", &[("Connected", value(false.into())), ("Paired", value(true.into())), ("Alias", value("MI BT 18I".into()))]),
@@ -242,7 +268,9 @@ mod tests {
             // Seen during a scan but never paired: listed last.
             (path("/org/bluez/hci0/dev_C"), object("org.bluez.Device1", &[("Alias", value("Another TV".into()))])),
         ]);
-        let devices = summarize(&objects).unwrap().devices;
+        let bluetooth = summarize(&objects).unwrap();
+        assert!(bluetooth.discovering);
+        let devices = bluetooth.devices;
         let order: Vec<&str> = devices.iter().map(|device| device.alias.as_str()).collect();
         assert_eq!(order, ["Soundcore Life Q20", "MI BT 18I", "Another TV"]);
         assert_eq!(

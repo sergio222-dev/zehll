@@ -34,13 +34,10 @@ pub fn view(bar: &Bar, subpanel: Subpanel) -> Element<'_, Message> {
 }
 
 /// Shared dialog chrome: title strip, body, DETAILS and DONE.
-fn frame<'a>(bar: &'a Bar, title: &'a str, count: String, body: Element<'a, Message>, subpanel: Subpanel) -> Element<'a, Message> {
+fn frame<'a>(bar: &'a Bar, title: &'a str, count: String, scanning: bool, body: Element<'a, Message>, subpanel: Subpanel) -> Element<'a, Message> {
     let theme = bar.theme;
-    let strip = row![
-        text(title).font(CONDENSED_HEAVY).size(20),
-        Space::new().width(Length::Fill),
-        text(count).font(CONDENSED_BOLD).size(14).color(theme.text_muted),
-    ]
+    let status: Element<'a, Message> = if scanning { scan_indicator(bar) } else { text(count).font(CONDENSED_BOLD).size(14).color(theme.text_muted).into() };
+    let strip = row![text(title).font(CONDENSED_HEAVY).size(20), Space::new().width(Length::Fill), status]
     .align_y(Alignment::Center)
     .padding([0, 16])
     .height(40);
@@ -70,6 +67,17 @@ fn frame<'a>(bar: &'a Bar, title: &'a str, count: String, body: Element<'a, Mess
         .push(dialog)
         .push(crate::shape(shape::Kind::Brackets { arm: 18.0, width: 2.0 }, theme.accent))
         .into()
+}
+
+/// "SCANNING" with four blocks lighting up in turn.
+fn scan_indicator(bar: &Bar) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let blocks = Row::with_children((0..4u8).map(|block| {
+        let color = if block == bar.scan_frame % 4 { theme.glow } else { theme.border };
+        container(Space::new()).width(6).height(10).style(move |_| container::background(color)).into()
+    }))
+    .spacing(3);
+    row![blocks, text("SCANNING").font(CONDENSED_BOLD).size(14).color(theme.glow)].spacing(8).align_y(Alignment::Center).into()
 }
 
 fn audio(bar: &Bar) -> Element<'_, Message> {
@@ -132,7 +140,7 @@ fn audio(bar: &Bar) -> Element<'_, Message> {
     let device = column![text("OUTPUT DEVICE").font(CONDENSED_BOLD).size(13).color(theme.text_muted), device.spacing(4)].spacing(6);
 
     let body = column![scrollable(list).height(Length::Fill), device].spacing(14).into();
-    frame(bar, "AUDIO OUTPUT", format!("{} STREAMS", streams.len()), body, Subpanel::Audio)
+    frame(bar, "AUDIO OUTPUT", format!("{} STREAMS", streams.len()), false, body, Subpanel::Audio)
 }
 
 fn stream_row<'a>(bar: &'a Bar, stream: &'a mixer::Stream) -> Element<'a, Message> {
@@ -198,7 +206,7 @@ fn stream_row<'a>(bar: &'a Bar, stream: &'a mixer::Stream) -> Element<'a, Messag
 
 fn bluetooth_devices(bar: &Bar) -> Element<'_, Message> {
     let Some(bluetooth) = &bar.bluetooth else {
-        return frame(bar, "BLUETOOTH DEVICES", String::new(), empty("NO ADAPTER", bar), Subpanel::Bluetooth);
+        return frame(bar, "BLUETOOTH DEVICES", String::new(), false, empty("NO ADAPTER", bar), Subpanel::Bluetooth);
     };
     let linked = bluetooth.devices.iter().filter(|device| device.connected).count();
     let body = if bluetooth.devices.is_empty() {
@@ -207,7 +215,7 @@ fn bluetooth_devices(bar: &Bar) -> Element<'_, Message> {
         let cards = Column::with_children(bluetooth.devices.iter().map(|device| device_card(bar, &bluetooth.adapter, device))).spacing(10);
         scrollable(cards).height(Length::Fill).into()
     };
-    frame(bar, "BLUETOOTH DEVICES", format!("{linked} / {} LINKED", bluetooth.devices.len()), body, Subpanel::Bluetooth)
+    frame(bar, "BLUETOOTH DEVICES", format!("{linked} / {} LINKED", bluetooth.devices.len()), bluetooth.discovering, body, Subpanel::Bluetooth)
 }
 
 fn device_card<'a>(bar: &'a Bar, adapter: &zbus::zvariant::OwnedObjectPath, device: &'a bluetooth::Device) -> Element<'a, Message> {
@@ -321,7 +329,7 @@ fn accent_button<'a>(bar: &'a Bar, label: &'a str, message: Message) -> Element<
 
 fn wifi(bar: &Bar) -> Element<'_, Message> {
     let Some(wifi) = &bar.wifi else {
-        return frame(bar, "CONNECT TO WI-FI", String::new(), empty("NO WI-FI DEVICE", bar), Subpanel::Wifi);
+        return frame(bar, "CONNECT TO WI-FI", String::new(), false, empty("NO WI-FI DEVICE", bar), Subpanel::Wifi);
     };
     let body = if wifi.networks.is_empty() {
         empty("SCANNING", bar)
@@ -329,7 +337,7 @@ fn wifi(bar: &Bar) -> Element<'_, Message> {
         let rows = Column::with_children(wifi.networks.iter().map(|network| wifi_row(bar, network))).spacing(4);
         scrollable(rows).height(Length::Fill).into()
     };
-    frame(bar, "CONNECT TO WI-FI", format!("{} FOUND", wifi.networks.len()), body, Subpanel::Wifi)
+    frame(bar, "CONNECT TO WI-FI", format!("{} FOUND", wifi.networks.len()), wifi.scanning, body, Subpanel::Wifi)
 }
 
 fn wifi_row<'a>(bar: &'a Bar, network: &'a network::AccessPoint) -> Element<'a, Message> {

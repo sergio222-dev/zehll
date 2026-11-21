@@ -131,6 +131,8 @@ struct Bar {
     // Stream index and volume while a volume slider is being dragged.
     volume_drag: Option<(u32, u32)>,
     sink_picker_open: bool,
+    // Animation step of the scanning indicator.
+    scan_frame: u8,
     wifi: Option<network::Wifi>,
     // SSID asking for a password in the Wi-Fi sub-panel.
     wifi_prompt: Option<String>,
@@ -200,6 +202,7 @@ impl Bar {
             app_icons: HashMap::new(),
             volume_drag: None,
             sink_picker_open: false,
+            scan_frame: 0,
             wifi: None,
             wifi_prompt: None,
             wifi_password: String::new(),
@@ -282,6 +285,7 @@ enum Message {
     DragStreamVolume(u32, u32),
     ReleaseStreamVolume,
     ToggleSinkPicker,
+    ScanFrame,
     SetDefaultSink(String),
     BluetoothDevice(bluetooth::DeviceAction),
     Wifi(network::Wifi),
@@ -299,11 +303,24 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
     let mixer = match bar.subpanel {
         Some(subpanel::Subpanel::Audio) => Subscription::run(mixer::events).map(Message::Mixer),
         Some(subpanel::Subpanel::Wifi) => Subscription::run(network::wifi_events).map(Message::Wifi),
+        // Holds a discovery session; it emits nothing.
+        Some(subpanel::Subpanel::Bluetooth) => Subscription::run(bluetooth::discover).map(|()| Message::ScanFrame),
         _ => Subscription::none(),
+    };
+    // The scanning indicator animates only while a scan runs.
+    let scanning = match bar.subpanel {
+        Some(subpanel::Subpanel::Wifi) => bar.wifi.as_ref().is_some_and(|wifi| wifi.scanning),
+        Some(subpanel::Subpanel::Bluetooth) => bar.bluetooth.as_ref().is_some_and(|bluetooth| bluetooth.discovering),
+        _ => false,
+    };
+    let scan_animation = match scanning {
+        true => time::every(Duration::from_millis(150)).map(|_| Message::ScanFrame),
+        false => Subscription::none(),
     };
     let panel = match bar.panel {
         Some(_) => Subscription::batch([
             mixer,
+            scan_animation,
             keyboard::listen().map(Message::Key),
             Subscription::run(audio::events).map(Message::Audio),
             Subscription::run(network::events).map(Message::Network),
@@ -528,6 +545,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
         }
         Message::ToggleSinkPicker => bar.sink_picker_open = !bar.sink_picker_open,
+        Message::ScanFrame => bar.scan_frame = bar.scan_frame.wrapping_add(1),
         Message::SetDefaultSink(name) => {
             bar.sink_picker_open = false;
             return Task::future(mixer::set_default_sink(name)).discard();

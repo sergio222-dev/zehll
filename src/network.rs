@@ -105,7 +105,12 @@ fn merge(access_points: Vec<AccessPoint>) -> Vec<AccessPoint> {
 pub struct Wifi {
     pub device: OwnedObjectPath,
     pub networks: Vec<AccessPoint>,
+    /// A scan requested when the sub-panel opened has not finished yet.
+    pub scanning: bool,
 }
+
+// NetworkManager may refuse a scan without saying so later; stop showing it as scanning after this.
+const SCAN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Streams nearby Wi-Fi networks while the Wi-Fi sub-panel is open, after asking for a fresh scan.
 pub fn wifi_events() -> impl Stream<Item = Wifi> {
@@ -124,17 +129,22 @@ pub fn wifi_events() -> impl Stream<Item = Wifi> {
                 return;
             }
         };
+        // `LastScan` changes when a scan finishes; remember it to know when the requested one is done.
+        let mut scan_since = None;
         if let Ok(Some(device)) = wifi_device(&connection).await {
             let scan = async {
+                let wireless = dbus::proxy(&connection, SERVICE, device.as_str(), WIRELESS).await?;
+                let last_scan: i64 = wireless.get_property("LastScan").await?;
                 let options: HashMap<&str, Value<'_>> = HashMap::new();
-                dbus::proxy(&connection, SERVICE, device.as_str(), WIRELESS).await?.call_method("RequestScan", &(options,)).await
+                wireless.call_method("RequestScan", &(options,)).await?;
+                zbus::Result::Ok(last_scan)
             };
             // NetworkManager refuses scans that come too soon after the last one; the cached list is fine then.
-            let _ = scan.await;
+            scan_since = scan.await.ok().map(|last_scan| (last_scan, std::time::Instant::now()));
         }
         let mut last = None;
         loop {
-            let wifi = read_wifi(&connection).await.ok().flatten();
+            let wifi = read_wifi(&connection, scan_since).await.ok().flatten();
             if wifi != last {
                 last = wifi.clone();
                 if let Some(wifi) = wifi
@@ -187,12 +197,14 @@ async fn wifi_device(connection: &Connection) -> zbus::Result<Option<OwnedObject
     Ok(None)
 }
 
-async fn read_wifi(connection: &Connection) -> zbus::Result<Option<Wifi>> {
+async fn read_wifi(connection: &Connection, scan_since: Option<(i64, std::time::Instant)>) -> zbus::Result<Option<Wifi>> {
     let Some(device) = wifi_device(connection).await? else {
         return Ok(None);
     };
     let wireless = dbus::proxy(connection, SERVICE, device.as_str(), WIRELESS).await?;
     let active: OwnedObjectPath = wireless.get_property("ActiveAccessPoint").await?;
+    let last_scan: i64 = wireless.get_property("LastScan").await?;
+    let scanning = scan_since.is_some_and(|(before, requested)| last_scan == before && requested.elapsed() < SCAN_TIMEOUT);
     let paths: Vec<OwnedObjectPath> = wireless.call("GetAllAccessPoints", &()).await?;
     let known = saved_profiles(connection).await?;
 
@@ -213,7 +225,7 @@ async fn read_wifi(connection: &Connection) -> zbus::Result<Option<Wifi>> {
             path,
         });
     }
-    Ok(Some(Wifi { device, networks: merge(access_points) }))
+    Ok(Some(Wifi { device, networks: merge(access_points), scanning }))
 }
 
 /// Saved Wi-Fi connection profiles by SSID.
