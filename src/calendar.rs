@@ -5,12 +5,19 @@ pub struct Day {
     pub in_month: bool,
 }
 
+/// Days in the month grid: six weeks.
+pub const GRID_DAYS: u64 = 42;
+
+/// Monday on or before `first`, where the month grid starts.
+pub fn grid_start(first: NaiveDate) -> NaiveDate {
+    first - Days::new(u64::from(first.weekday().num_days_from_monday()))
+}
+
 /// Six Monday-first weeks covering the month of `first`, padded with the adjacent months.
 pub fn month_grid(first: NaiveDate) -> Vec<Day> {
-    let start = first - Days::new(u64::from(first.weekday().num_days_from_monday()));
-    start
+    grid_start(first)
         .iter_days()
-        .take(42)
+        .take(GRID_DAYS as usize)
         .map(|date| Day { day: date.day(), in_month: date.month() == first.month() })
         .collect()
 }

@@ -3,7 +3,10 @@
 
 use std::collections::HashSet;
 
-use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeDelta, TimeZone};
+use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone};
+use tokio::process::Command;
+
+use crate::calendar;
 
 /// A timed meeting, with its times already converted to the local time zone.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,10 +66,11 @@ pub fn status_from_exit(code: Option<i32>) -> Status {
     }
 }
 
-/// Parses the JSON array printed by `gcal.py events`, converting times into `tz`.
+/// Parses the `{"events": [...]}` object printed by `gcal.py events`, converting times into `tz`.
 /// Malformed entries are skipped; malformed JSON yields no meetings.
 pub fn parse_events<Tz: TimeZone>(json: &str, tz: &Tz) -> Vec<Meeting> {
-    let items: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    let output: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    let items = output.get("events").and_then(|events| events.as_array()).map(Vec::as_slice).unwrap_or_default();
     let time = |item: &serde_json::Value, key: &str| {
         let parsed = DateTime::parse_from_rfc3339(item.get(key)?.as_str()?).ok()?;
         Some(parsed.with_timezone(tz).naive_local())
@@ -167,6 +171,39 @@ pub fn has_meet_link(meeting: &Meeting) -> bool {
     meeting.link.starts_with("https://meet.google.com/")
 }
 
+/// Dates to fetch, end exclusive: the month grid of `month` plus today and tomorrow, which
+/// the pill and the alerts need whatever month the calendar shows.
+pub fn fetch_range(month: NaiveDate, today: NaiveDate) -> (NaiveDate, NaiveDate) {
+    let start = calendar::grid_start(month);
+    let end = start + Days::new(calendar::GRID_DAYS);
+    (start.min(today), end.max(today + Days::new(2)))
+}
+
+const GCAL: &str = include_str!("../scripts/gcal.py");
+
+/// Runs `gcal.py events` for the dates `from..to` in the local time zone. The script is
+/// embedded in the binary, so it needs only `python3` and the calendarz login.
+pub async fn fetch(from: NaiveDate, to: NaiveDate) -> (Status, Vec<Meeting>) {
+    let bound = |date: NaiveDate| {
+        Local.from_local_datetime(&date.and_time(NaiveTime::MIN)).earliest().map(|time| time.to_rfc3339())
+    };
+    let (Some(from), Some(to)) = (bound(from), bound(to)) else {
+        return (Status::Error, Vec::new());
+    };
+    let output = match Command::new("python3").args(["-c", GCAL, "events", &from, &to]).output().await {
+        Ok(output) => output,
+        Err(err) => {
+            eprintln!("zehll: cannot run python3 for the calendar: {err}");
+            return (Status::Error, Vec::new());
+        }
+    };
+    let status = status_from_exit(output.status.code());
+    if status == Status::Error {
+        eprintln!("zehll: calendar fetch failed: {}", String::from_utf8_lossy(&output.stdout).trim());
+    }
+    (status, parse_events(&String::from_utf8_lossy(&output.stdout), &Local))
+}
+
 /// Minutes before the start at which the heads-up notification fires.
 pub const LEAD_MINUTES: i64 = 5;
 /// How long after the start a missed alert card still opens (e.g. after a late fetch).
@@ -241,11 +278,11 @@ mod tests {
 
     #[test]
     fn parses_gcal_output_into_the_given_time_zone() {
-        let json = r#"[
+        let json = r#"{"events": [
             {"id": "a", "title": "Design review", "start": "2026-11-21T13:00:00Z",
              "end": "2026-11-21T13:45:00Z", "calendar": "Work", "link": "https://meet.google.com/x"},
             {"id": "broken", "title": "No end", "start": "2026-11-21T14:00:00Z"}
-        ]"#;
+        ]}"#;
         let buenos_aires = FixedOffset::west_opt(3 * 3600).unwrap();
         let meetings = parse_events(json, &buenos_aires);
         assert_eq!(meetings.len(), 1);
@@ -254,6 +291,16 @@ mod tests {
         assert_eq!((m.start, m.end), (at(21, 10, 0), at(21, 10, 45)));
         assert_eq!(m.link, "https://meet.google.com/x");
         assert!(parse_events("not json", &buenos_aires).is_empty());
+        assert!(parse_events(r#"{"error": "reauth"}"#, &buenos_aires).is_empty());
+    }
+
+    #[test]
+    fn fetch_range_covers_the_month_grid_and_the_next_two_days() {
+        let date = |month, day| NaiveDate::from_ymd_opt(2026, month, day).unwrap();
+        assert_eq!(fetch_range(date(11, 1), date(11, 21)), (date(10, 26), date(12, 7)));
+        // Browsing a past month still fetches what the pill and the alerts need.
+        assert_eq!(fetch_range(date(9, 1), date(11, 21)), (date(8, 31), date(11, 23)));
+        assert_eq!(fetch_range(date(11, 1), date(12, 6)), (date(10, 26), date(12, 8)));
     }
 
     #[test]

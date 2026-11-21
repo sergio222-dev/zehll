@@ -47,6 +47,8 @@ const BAR_PADDING: u16 = 16;
 // After the panel closes, the pointer re-enters the bar's hover zone once the catcher is gone;
 // hovering does not reopen the panel within this window.
 const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
+// calendarz's poll interval.
+const MEETINGS_POLL: Duration = Duration::from_secs(120);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
 const BODY_FONT: Font = Font::with_name("Barlow");
@@ -147,6 +149,8 @@ struct Bar {
     // SSID asking for a password in the Wi-Fi sub-panel.
     wifi_prompt: Option<String>,
     wifi_password: String,
+    meetings: Vec<meetings::Meeting>,
+    meetings_status: meetings::Status,
 }
 
 struct Popup {
@@ -222,6 +226,8 @@ impl Bar {
             wifi: None,
             wifi_prompt: None,
             wifi_password: String::new(),
+            meetings: Vec::new(),
+            meetings_status: meetings::Status::Ok,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -232,6 +238,7 @@ impl Bar {
             true => restore.chain(Task::perform(flashbang::set(true), Message::ContentAdjustment)),
             false => restore,
         };
+        let restore = restore.chain(fetch_meetings(&bar));
         (bar, restore)
     }
 
@@ -327,6 +334,8 @@ enum Message {
     SelectWifi(String),
     WifiPassword(String),
     SubmitWifiPassword,
+    FetchMeetings,
+    Meetings((NaiveDate, NaiveDate), meetings::Status, Vec<meetings::Meeting>),
 }
 
 fn namespace() -> String {
@@ -365,6 +374,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
     };
     Subscription::batch([
         time::every(Duration::from_secs(1)).map(|_| Message::Tick),
+        time::every(MEETINGS_POLL).map(|_| Message::FetchMeetings),
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
         Subscription::run(tray::events).map(Message::Tray),
         Subscription::run(shortcuts::panel_toggle).map(|_| Message::TogglePanel),
@@ -621,7 +631,19 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let password = std::mem::take(&mut bar.wifi_password);
             return Task::future(network::connect(wifi.device.clone(), network.path.clone(), ssid, Some(password))).discard();
         }
-        Message::CalendarMonth(delta) => bar.calendar_month = panel::shift_month(bar.calendar_month, delta),
+        Message::CalendarMonth(delta) => {
+            bar.calendar_month = panel::shift_month(bar.calendar_month, delta);
+            return fetch_meetings(bar);
+        }
+        Message::FetchMeetings => return fetch_meetings(bar),
+        Message::Meetings(range, status, meetings) => {
+            // A reply for a month no longer shown would drop the meetings of the current one.
+            let current = meetings::fetch_range(bar.calendar_month, bar.now.date_naive());
+            if range == current && status != meetings::Status::Error {
+                bar.meetings_status = status;
+                bar.meetings = meetings;
+            }
+        }
         Message::ReloadShell => {
             // Start a fresh instance and leave; it takes over the D-Bus names once this one exits.
             match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
@@ -772,6 +794,14 @@ fn pomodoro_finished(finished: pomodoro::Phase) -> Task<Message> {
 }
 
 /// Applies `change` to a fresh read of the todo file, since ii may have edited it meanwhile.
+/// Fetches the meetings of the month shown in the calendar and of the next two days.
+fn fetch_meetings(bar: &Bar) -> Task<Message> {
+    let range = meetings::fetch_range(bar.calendar_month, bar.now.date_naive());
+    Task::perform(meetings::fetch(range.0, range.1), move |(status, meetings)| {
+        Message::Meetings(range, status, meetings)
+    })
+}
+
 fn update_todos(bar: &mut Bar, change: impl FnOnce(&mut Vec<todo::Item>)) {
     let mut items = todo::load();
     change(&mut items);
@@ -841,7 +871,14 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
         return Task::none();
     };
     bar.uptime = system::uptime().unwrap_or_default();
-    bar.calendar_month = panel::first_of_month(bar.now.date_naive());
+    let month = panel::first_of_month(bar.now.date_naive());
+    let fetch = match month == bar.calendar_month {
+        true => Task::none(),
+        false => {
+            bar.calendar_month = month;
+            fetch_meetings(bar)
+        }
+    };
     bar.todo_items = todo::load();
 
     // Layer surfaces have no "click outside" event, so a transparent layer covering the screen
@@ -875,7 +912,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
         .chain(Task::done(Message::NewLayerShell { settings: panel, id: open.panel }))
         .chain(Task::perform(nightlight::temperature(), Message::NightLight));
     bar.panel = Some(open);
-    task
+    Task::batch([task, fetch])
 }
 
 fn close_panel(bar: &mut Bar) -> Task<Message> {
