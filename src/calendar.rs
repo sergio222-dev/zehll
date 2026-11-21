@@ -1,0 +1,53 @@
+use chrono::{Datelike, Days, NaiveDate};
+
+pub struct Day {
+    pub day: u32,
+    pub in_month: bool,
+}
+
+/// Six Monday-first weeks covering the month of `first`, padded with the adjacent months.
+pub fn month_grid(first: NaiveDate) -> Vec<Day> {
+    let start = first - Days::new(u64::from(first.weekday().num_days_from_monday()));
+    start
+        .iter_days()
+        .take(42)
+        .map(|date| Day { day: date.day(), in_month: date.month() == first.month() })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(first: NaiveDate) -> (Vec<u32>, usize, Vec<u32>) {
+        let grid = month_grid(first);
+        let leading = grid.iter().take_while(|day| !day.in_month).map(|day| day.day).collect();
+        let in_month = grid.iter().filter(|day| day.in_month).count();
+        let trailing = grid.iter().rev().take_while(|day| !day.in_month).map(|day| day.day).collect::<Vec<_>>();
+        (leading, in_month, trailing.into_iter().rev().collect())
+    }
+
+    #[test]
+    fn november_2026_starts_on_a_sunday() {
+        let first = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        assert_eq!(month_grid(first).len(), 42);
+        assert_eq!(summary(first), (vec![26, 27, 28, 29, 30, 31], 30, vec![1, 2, 3, 4, 5, 6]));
+    }
+
+    #[test]
+    fn month_starting_on_monday_has_no_leading_days() {
+        let first = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let (leading, in_month, trailing) = summary(first);
+        assert!(leading.is_empty());
+        assert_eq!(in_month, 30);
+        assert_eq!(trailing.len(), 12);
+    }
+
+    #[test]
+    fn leap_february_and_year_boundary() {
+        let february = NaiveDate::from_ymd_opt(2028, 2, 1).unwrap();
+        assert_eq!(summary(february).1, 29);
+        let january = NaiveDate::from_ymd_opt(2027, 1, 1).unwrap();
+        assert_eq!(summary(january).0, vec![28, 29, 30, 31]);
+    }
+}

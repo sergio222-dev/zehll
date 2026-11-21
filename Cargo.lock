@@ -4514,6 +4514,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "wayland-protocols-hyprland"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "398431fac4608bdae919e5c21a1f53af76deb9fcafdf682912a506ecc945582f"
+dependencies = [
+ "bitflags 2.13.2",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "wayland-protocols-wlr",
+ "wayland-scanner",
+]
+
+[[package]]
 name = "wayland-protocols-misc"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5369,13 +5383,17 @@ name = "zehll"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "enumflags2",
  "freedesktop-icons",
  "iced",
  "iced_layershell",
  "serde_json",
  "system-tray",
  "tokio",
+ "wayland-client",
+ "wayland-protocols-hyprland",
  "winit-core",
+ "zbus",
 ]
 
 [[package]]

@@ -6,10 +6,15 @@ use iced::{Color, Point, Rectangle, Renderer, Size, Theme, mouse};
 pub enum Kind {
     /// Rectangle whose right edge is cut diagonally by `slant` pixels.
     Slant(f32),
-    /// L-shaped marks on the top-left and bottom-right corners.
-    Brackets,
+    /// L-shaped marks on the top-left and bottom-right corners: arm length and line width.
+    Brackets { arm: f32, width: f32 },
     /// Line of `thickness` along the bottom edge.
     Underline(f32),
+}
+
+impl Kind {
+    /// The small corner marks of icon slots.
+    pub const BRACKETS: Kind = Kind::Brackets { arm: 7.0, width: 1.0 };
 }
 
 pub struct Shape {
@@ -28,17 +33,18 @@ impl<Message> canvas::Program<Message> for Shape {
                 let points = [Point::ORIGIN, Point::new(w, 0.0), Point::new(w - slant, h), Point::new(0.0, h)];
                 frame.fill(&polygon(&points), self.color);
             }
-            Kind::Brackets => {
-                let arm = 7.0;
+            Kind::Brackets { arm, width } => {
+                // Keep the stroke inside the bounds.
+                let inset = width / 2.0;
                 let marks = Path::new(|builder| {
-                    builder.move_to(Point::new(0.5, arm));
-                    builder.line_to(Point::new(0.5, 0.5));
-                    builder.line_to(Point::new(arm, 0.5));
-                    builder.move_to(Point::new(w - arm, h - 0.5));
-                    builder.line_to(Point::new(w - 0.5, h - 0.5));
-                    builder.line_to(Point::new(w - 0.5, h - arm));
+                    builder.move_to(Point::new(inset, arm));
+                    builder.line_to(Point::new(inset, inset));
+                    builder.line_to(Point::new(arm, inset));
+                    builder.move_to(Point::new(w - arm, h - inset));
+                    builder.line_to(Point::new(w - inset, h - inset));
+                    builder.line_to(Point::new(w - inset, h - arm));
                 });
-                frame.stroke(&marks, Stroke::default().with_color(self.color).with_width(1.0));
+                frame.stroke(&marks, Stroke::default().with_color(self.color).with_width(width));
             }
             Kind::Underline(thickness) => {
                 frame.fill_rectangle(Point::new(0.0, h - thickness), Size::new(w, thickness), self.color);

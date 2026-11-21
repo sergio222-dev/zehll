@@ -1,0 +1,37 @@
+# Quick settings sub-panels
+
+Objective: HUD sub-panels for Wi-Fi, Bluetooth and audio, opened from the quick settings tiles (artboard Subpanels of the Zehll Bar Design canvas). Branch: `feat/subpanels` (from `feat/side-panel`).
+Delivery: one commit per sub-panel. Test runner: `cargo test`.
+
+## Specs
+
+- S1 "para la red al hacer click aparece esta sub panel flotante, para elegir red, en details abre una interfaz de wifi". Details runs ii's `kcmshell6 kcm_networkmanagement`.
+- S2 "en bluetooth muesta ese subpanel flotante, en detail tambien abre una interfaz de bluetooth". Details runs ii's `kcmshell6 kcm_bluetooth`.
+- S3 "el audio, detail abre pulseaudio control". Details runs `pavucontrol`.
+- S5 "el boton de nightlight tiene el siguiente subpanel" (Eye protection: night light enable, automatic, intensity; anti-flashbang; brightness; gamma), artboard EyeProtection.
+- S4 Opening: "no se abren los sub paneles al hacer click en los quicksettings, deberia abrir el subpanel". Clicking a tile's icon toggles; clicking the rest of the tile (or right-clicking) opens its sub-panel; tiles without a sub-panel toggle anywhere. Sub-panels float over the dimmed panel inside the panel surface; DONE, Escape or a click outside closes them.
+- Constraint: data is read only while a sub-panel is open.
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 | S3, S4 | inline | done | `feat: add the audio sub-panel` |
+| T2 | S2 | inline | done | `feat: add the Bluetooth sub-panel` |
+| T3 | S1 | inline | done | `feat: add the Wi-Fi sub-panel` |
+| T4 | S5 | inline | done | `feat: add the eye protection sub-panel` |
+
+## Log
+
+- L1 (2026-11-21) Request: "los subpaneles: habria que hacer los diseños ... por ahora esos 3", then "se ven bien, implementemos".
+- L2 ii runs `kcmshell6 kcm_networkmanagement`, `kcmshell6 kcm_bluetooth` and `pavucontrol-qt`/`pavucontrol` for Details (`apps` in ii's config). System: wlan0 present (disconnected, user is wired); pactl 17 has `-f json`; streams play through the EasyEffects sink; BlueZ exposes Battery1.
+- L3 T1 done: sub-panels render inside the panel surface over a dimmed layer (click closes), opened with a right click on a tile; Escape closes the sub-panel before the panel. Audio: `src/mixer.rs` reads `pactl -f json` sink inputs and sinks plus the default sink, refreshed through the shared `audio::watch` (pactl subscribe, only while the audio sub-panel is open). Rows show the app icon (looked up once by executable), title, percent and a 20-cell segmented volume (click sets, scroll ±5); a pick list sets the default sink; Details runs pavucontrol. Parser tests RED then GREEN (25 total). Verified by screenshot: 4 real streams, Firefox icon, SOUNDCORE LIFE Q20 selected. Not verified on purpose: changing volumes or the default sink (would alter the user's audio routing through EasyEffects); clicks.
+- L4 T2 done: `bluetooth::devices` lists every device BlueZ knows like ii (connected, then paired, then unpaired) with alias, icon kind, Trusted and Battery1 percentage; actions Connect, Pair, Disconnect, Forget (Adapter1.RemoveDevice) and Trust. The sub-panel shows the connected device with glow and a 10-cell battery gauge. Test RED then GREEN (26 total). Verified by screenshot: Soundcore Life Q20 connected at 80%, MI BT 18I not paired with ALWAYS CONNECT and PAIR. Not verified on purpose: the actions (would disconnect the user's headphones); clicks.
+- L5 T3 done: `network::wifi_events` finds the Wi-Fi device, requests a scan, and lists access points (one GetAll per AP) merged per SSID (strongest kept, hidden dropped, active first), marking saved profiles; it runs only while the Wi-Fi sub-panel is open. `network::connect` activates a saved profile or calls AddAndActivateConnection, with a WPA-PSK password for new secured networks (inline prompt). Tests RED then GREEN (28 total). Verified by screenshot: 11 real networks with bars, bands and locks. Not verified on purpose: connecting (the user is wired). All three sub-panels done.
+- L6 (2026-11-21) User: "no se abren los sub paneles al hacer click en los quicksettings, deberia abrir el subpanel". Cause: sub-panels opened only on right click (copied from ii's tooltip). S4 rewritten: the icon block is a nested button that toggles, the tile body opens the sub-panel, right click still opens it. Verified the tiles render unchanged; clicks not verifiable here.
+- L7 (2026-11-21) User: "los volumenes del sonido deberian ser unos sliders". Audio rows now use HUD-styled iced sliders (6 px accent rail, 4 px handle that glows when hovered or dragged); the dragged value is shown locally and pactl runs once on release; the wheel still steps 5%. Verified by screenshot with live streams; dragging not verifiable here.
+- L8 (2026-11-21) User: "en la lista para elegir dispositivo de audio se resalta el que esta elegido pero al hacer hover eso cambia, el hover deberia tener un resaltado mas lijero". Cause: iced's pick_list menu has one highlight style shared by the hovered option. Replaced it with an inline list: the chosen device has a strong accent block and is listed first; hovering others adds only the light glow; names stay on one line. Verified by screenshot with the list open; hover not verifiable here.
+- L9 (2026-11-21) User: "deberia haber un indicador de carga cuando esta scaneando por bluetooth o red". Wi-Fi: remember `LastScan` before `RequestScan`; scanning until it changes (15 s cap for refused scans). Bluetooth: the sub-panel now runs `StartDiscovery` on its own connection, held by a subscription, so closing it ends discovery; scanning comes from the adapter's `Discovering`. The strip shows "SCANNING" with four blocks animated by a 150 ms timer that runs only while scanning. Test RED then GREEN (28 total). Verified: Discovering true while the Bluetooth sub-panel is open and false after Zehll exits; Wi-Fi shows SCANNING then "10 FOUND".
+- L10 (2026-11-21) User: "listo la primer tanda de subpaneles esta completa". First batch (Wi-Fi, Bluetooth, audio) closed.
+- L11 (2026-11-21) Second batch: eye protection sub-panel, "se ve bien a implementar". Night light intensity (2500–6000 K) and the automatic schedule switch are persisted in state.json; gamma via `hyprctl hyprsunset gamma` (min 25); brightness over DDC/CI with ddcutil for the panel's monitor (`src/brightness.rs`, 0.3 s per call, applied on slider release); content adjustment loads Zehll's own anti-flashbang shader (`assets/anti-flashbang.glsl`, 16 samples, not ii's GPL shader) through `hyprctl eval 'hl.config(...)'` and is reapplied at startup. ii's brightness adjustment (screenshot + ImageMagick on every window change) is not implemented yet: pending the user's decision. Parser tests RED then GREEN (30 total). Verified: Hyprland loads the shader without errors and it was turned off again; screenshot shows real values (ON · 5000K, brightness 20% from DDC, gamma 100%). Not verified: slider and switch interaction.
+- L12 (2026-11-21) User: "vamos por la A". ii's brightness adjustment (full screenshot + ImageMagick + DDC on every window change) is not implemented: the anti-flashbang shader covers the same need without that cost. Removed from the design artboard too.

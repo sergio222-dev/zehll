@@ -9,6 +9,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - Active window class and title, updated live from the Hyprland event socket.
 - Clock with a hover tooltip: full date, system uptime and pending tasks from the `ii` todo list.
 - System tray (StatusNotifierItem): icons, left/middle click activation and right-click context menus (DBusMenu) with submenus and toggles.
+- Side panel with uptime, reload and power actions, quick settings, notifications, a month calendar and a to-do list shared with ii (`~/.local/state/quickshell/user/todo.json`) and a pomodoro timer (25/5 min, a 15 min break every 4 cycles) that notifies when each phase ends.
 - One bar per monitor.
 - Material 3 theme loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -26,6 +27,34 @@ cargo run --release
 ```
 
 Debug builds start noticeably slower because the GPU renderer is unoptimized.
+
+## Side panel
+
+Hover the right edge of the bar to open the side panel. Click outside it or press Escape to close it. Zehll registers the Hyprland global shortcut `zehll:panelToggle`, so a keybind can toggle it:
+
+```
+bind = SUPER, N, global, zehll:panelToggle
+```
+
+To slide the panel in from the right, add Hyprland layer rules for its namespaces:
+
+```
+layerrule = animation slide right, ^zehll-panel$
+layerrule = noanim, ^zehll-panel-catcher$
+```
+
+The power button runs [wlogout](https://github.com/ArtsyMacaw/wlogout).
+
+Quick settings toggle Wi-Fi, Bluetooth, audio output and microphone mute, night light and keep awake:
+
+- Clicking a tile's icon toggles it; clicking the rest of the tile opens its sub-panel: Wi-Fi networks (connect, with a password prompt for new secured ones), Bluetooth devices (connect, pair, disconnect, forget, always connect) or the audio mixer (per-app volume sliders and output device). Details opens KDE's network or Bluetooth settings, or pavucontrol.
+- The night light tile opens eye protection: night light intensity and schedule, an anti-flashbang screen shader that dims bright screens, monitor brightness over DDC/CI ([ddcutil](https://www.ddcutil.com/)) and gamma.
+- Night light switches [hyprsunset](https://github.com/hyprwm/hyprsunset) between 5000 K and 6000 K. It turns on automatically from 19:00 to 06:30; a manual toggle holds until the next change of the schedule.
+- Keep awake holds a logind idle inhibitor, which hypridle honors. It is remembered across restarts in `~/.local/state/zehll/state.json`.
+
+## Notifications
+
+Zehll is a notification daemon (`org.freedesktop.Notifications`); new notifications pop up at the top right (up to three, 5 s by default, critical ones until dismissed) and are listed in the side panel, with do not disturb and clear all. Notifications show their image or app icon and their action buttons; clicking one runs its default action (or hides the popup when it has none), and ✕ dismisses it. If another daemon such as swaync owns the name, Zehll waits in the D-Bus queue and takes over when that daemon exits, so disable the other daemon to use Zehll's.
 
 ## Theme
 

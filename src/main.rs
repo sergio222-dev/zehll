@@ -1,20 +1,38 @@
+mod audio;
+mod bluetooth;
+mod brightness;
+mod calendar;
+mod dbus;
+mod flashbang;
 mod hyprland;
+mod idle;
 mod menu;
+mod mixer;
+mod network;
+mod nightlight;
+mod notifications;
+mod panel;
+mod pomodoro;
+mod popup;
 mod shape;
+mod shortcuts;
+mod state;
+mod subpanel;
 mod system;
 mod theme;
+mod todo;
 mod tray;
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{Column, Row, Space, Stack, button, canvas, column, container, image, mouse_area, row, svg, text};
 use iced::window::Id;
-use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Shadow, Subscription, Task, time, window};
+use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Shadow, Subscription, Task, keyboard, time, window};
 use iced_layershell::actions::IcedNewPopupSettings;
 use iced_layershell::daemon;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption, PopupAnchor, PopupGravity};
@@ -25,6 +43,9 @@ use system_tray::menu::{MenuType, ToggleState, ToggleType};
 
 const BAR_HEIGHT: u32 = 44;
 const BAR_PADDING: u16 = 16;
+// After the panel closes, the pointer re-enters the bar's hover zone once the catcher is gone;
+// hovering does not reopen the panel within this window.
+const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
 const BODY_FONT: Font = Font::with_name("Barlow");
@@ -75,26 +96,86 @@ struct Bar {
     now: DateTime<Local>,
     uptime: Duration,
     todos: system::Todos,
+    // Every surface besides the bars, kept until the compositor reports it closed so a surface
+    // playing its close animation is never drawn as a bar.
+    surfaces: HashMap<Id, Surface>,
     tooltip: Option<Id>,
-    // Still rendered as a tooltip while the compositor plays its close animation.
-    closing_tooltip: Option<Id>,
     tray_client: Option<Arc<Client>>,
     // Keyed by D-Bus address, which keeps the icon order stable.
     tray_items: BTreeMap<String, tray::TrayItem>,
-    tray_menu: Option<OpenMenu>,
-    // Still rendered as a menu while the compositor plays its close animation.
-    closing_tray_menu: Option<OpenMenu>,
+    tray_menu: Option<Id>,
+    panel: Option<OpenPanel>,
+    panel_closed_at: Option<Instant>,
+    calendar_month: NaiveDate,
+    audio: Option<audio::Audio>,
+    network: Option<network::Network>,
+    bluetooth: Option<bluetooth::Bluetooth>,
+    night_light: Option<u32>,
+    // Last state the automatic schedule asked for; a change means a schedule boundary was crossed.
+    night_schedule: Option<bool>,
+    // logind idle inhibitor lock held while "keep awake" is on.
+    keep_awake: Option<Arc<zbus::zvariant::OwnedFd>>,
+    notifications_handle: Option<notifications::Handle>,
+    // Newest first.
+    notifications: Vec<notifications::Notification>,
+    do_not_disturb: bool,
+    // Newest first.
+    popups: Vec<Popup>,
+    popup_surface: Option<Id>,
+    panel_tab: panel::Tab,
+    todo_items: Vec<todo::Item>,
+    todo_input: String,
+    pomodoro: pomodoro::Pomodoro,
+    subpanel: Option<subpanel::Subpanel>,
+    mixer: Option<mixer::Mixer>,
+    // Icons of audio streams by executable name, looked up once.
+    app_icons: HashMap<String, Option<tray::Icon>>,
+    // Stream index and volume while a volume slider is being dragged.
+    volume_drag: Option<(u32, u32)>,
+    sink_picker_open: bool,
+    // Animation step of the scanning indicator.
+    scan_frame: u8,
+    night_temperature: u32,
+    night_automatic: bool,
+    content_adjustment: bool,
+    gamma: Option<u32>,
+    brightness: Option<brightness::Monitor>,
+    // Slider being dragged in the eye protection sub-panel and its value.
+    level_drag: Option<(subpanel::Level, u32)>,
+    wifi: Option<network::Wifi>,
+    // SSID asking for a password in the Wi-Fi sub-panel.
+    wifi_prompt: Option<String>,
+    wifi_password: String,
+}
+
+struct Popup {
+    id: u32,
+    expires: Option<Instant>,
+}
+
+enum Surface {
+    Tooltip,
+    TrayMenu(OpenMenu),
+    Panel,
+    Popups,
+    // Transparent full-screen layer below the panel; clicking it closes the panel.
+    Catcher,
 }
 
 struct OpenMenu {
-    id: Id,
     address: String,
     // Ids of the submenus entered from the root.
     path: Vec<i32>,
 }
 
+struct OpenPanel {
+    panel: Id,
+    catcher: Id,
+}
+
 impl Bar {
     fn new() -> (Self, Task<Message>) {
+        let state = state::State::load();
         let bar = Self {
             theme: theme::Theme::load(),
             theme_modified: theme::modified(),
@@ -102,14 +183,74 @@ impl Bar {
             now: Local::now(),
             uptime: Duration::ZERO,
             todos: system::Todos::default(),
+            surfaces: HashMap::new(),
             tooltip: None,
-            closing_tooltip: None,
             tray_client: None,
             tray_items: BTreeMap::new(),
             tray_menu: None,
-            closing_tray_menu: None,
+            panel: None,
+            panel_closed_at: None,
+            calendar_month: panel::first_of_month(Local::now().date_naive()),
+            audio: None,
+            network: None,
+            bluetooth: None,
+            night_light: None,
+            night_schedule: None,
+            keep_awake: None,
+            notifications_handle: None,
+            notifications: Vec::new(),
+            do_not_disturb: state.do_not_disturb,
+            popups: Vec::new(),
+            popup_surface: None,
+            panel_tab: panel::Tab::Calendar,
+            todo_items: Vec::new(),
+            todo_input: String::new(),
+            pomodoro: pomodoro::Pomodoro::default(),
+            subpanel: None,
+            mixer: None,
+            app_icons: HashMap::new(),
+            volume_drag: None,
+            sink_picker_open: false,
+            scan_frame: 0,
+            night_temperature: state.night_temperature,
+            night_automatic: state.night_automatic,
+            content_adjustment: state.content_adjustment,
+            gamma: None,
+            brightness: None,
+            level_drag: None,
+            wifi: None,
+            wifi_prompt: None,
+            wifi_password: String::new(),
         };
-        (bar, Task::none())
+        let restore = match state.keep_awake {
+            true => Task::perform(idle::inhibit(), Message::KeepAwake),
+            false => Task::none(),
+        };
+        // Runtime Hyprland options are gone after a restart, so reapply the shader.
+        let restore = match state.content_adjustment {
+            true => restore.chain(Task::perform(flashbang::set(true), Message::ContentAdjustment)),
+            false => restore,
+        };
+        (bar, restore)
+    }
+
+    fn save_state(&self) {
+        state::State {
+            keep_awake: self.keep_awake.is_some(),
+            do_not_disturb: self.do_not_disturb,
+            night_temperature: self.night_temperature,
+            night_automatic: self.night_automatic,
+            content_adjustment: self.content_adjustment,
+        }
+        .save();
+    }
+
+    fn open_menu(&self) -> Option<(Id, &OpenMenu)> {
+        let id = self.tray_menu?;
+        match self.surfaces.get(&id)? {
+            Surface::TrayMenu(open) => Some((id, open)),
+            _ => None,
+        }
     }
 
     fn menu_title(&self, address: &str) -> Option<String> {
@@ -132,18 +273,103 @@ enum Message {
     NavigateTrayMenu(Vec<i32>),
     ActivateTrayMenuItem(i32),
     WindowClosed(Id),
+    TogglePanel,
+    HoverPanel,
+    ClosePanel,
+    Key(keyboard::Event),
+    CalendarMonth(i32),
+    ReloadShell,
+    PowerMenu,
+    Audio(audio::Audio),
+    ToggleMute(&'static str),
+    Network(network::Network),
+    SetWifi(bool),
+    Bluetooth(bluetooth::Bluetooth),
+    SetBluetooth(zbus::zvariant::OwnedObjectPath, bool),
+    NightLight(Option<u32>),
+    SetNightLight(bool),
+    ToggleKeepAwake,
+    KeepAwake(Option<Arc<zbus::zvariant::OwnedFd>>),
+    Notifications(notifications::Event),
+    DismissNotification(u32),
+    ClearNotifications,
+    ToggleDoNotDisturb,
+    HidePopup(u32),
+    InvokeAction(u32, String),
+    SelectTab(panel::Tab),
+    TodoInput(String),
+    AddTodo,
+    ToggleTodo(usize, String),
+    RemoveTodo(usize, String),
+    TogglePomodoro,
+    ResetPomodoro,
+    SkipPomodoro,
+    OpenSubpanel(subpanel::Subpanel),
+    CloseSubpanel,
+    SubpanelDetails(subpanel::Subpanel),
+    Mixer(mixer::Mixer),
+    SetStreamVolume(u32, u32),
+    DragStreamVolume(u32, u32),
+    ReleaseStreamVolume,
+    ToggleSinkPicker,
+    ScanFrame,
+    ToggleNightAutomatic,
+    ContentAdjustment(bool),
+    SetContentAdjustment(bool),
+    Gamma(Option<u32>),
+    Brightness(Option<brightness::Monitor>),
+    DragLevel(subpanel::Level, u32),
+    ReleaseLevel,
+    SetDefaultSink(String),
+    BluetoothDevice(bluetooth::DeviceAction),
+    Wifi(network::Wifi),
+    SelectWifi(String),
+    WifiPassword(String),
+    SubmitWifiPassword,
 }
 
 fn namespace() -> String {
     String::from("zehll")
 }
 
-fn subscription(_: &Bar) -> Subscription<Message> {
+fn subscription(bar: &Bar) -> Subscription<Message> {
+    // Keys (Escape) and the panel's data sources only run while the panel is open.
+    let mixer = match bar.subpanel {
+        Some(subpanel::Subpanel::Audio) => Subscription::run(mixer::events).map(Message::Mixer),
+        Some(subpanel::Subpanel::Wifi) => Subscription::run(network::wifi_events).map(Message::Wifi),
+        // Holds a discovery session; it emits nothing.
+        Some(subpanel::Subpanel::Bluetooth) => Subscription::run(bluetooth::discover).map(|()| Message::ScanFrame),
+        _ => Subscription::none(),
+    };
+    // The scanning indicator animates only while a scan runs.
+    let scanning = match bar.subpanel {
+        Some(subpanel::Subpanel::Wifi) => bar.wifi.as_ref().is_some_and(|wifi| wifi.scanning),
+        Some(subpanel::Subpanel::Bluetooth) => bar.bluetooth.as_ref().is_some_and(|bluetooth| bluetooth.discovering),
+        _ => false,
+    };
+    let scan_animation = match scanning {
+        true => time::every(Duration::from_millis(150)).map(|_| Message::ScanFrame),
+        false => Subscription::none(),
+    };
+    let panel = match bar.panel {
+        Some(_) => Subscription::batch([
+            mixer,
+            scan_animation,
+            keyboard::listen().map(Message::Key),
+            Subscription::run(audio::events).map(Message::Audio),
+            Subscription::run(network::events).map(Message::Network),
+            Subscription::run(bluetooth::events).map(Message::Bluetooth),
+        ]),
+        None => Subscription::none(),
+    };
     Subscription::batch([
         time::every(Duration::from_secs(1)).map(|_| Message::Tick),
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
         Subscription::run(tray::events).map(Message::Tray),
+        Subscription::run(shortcuts::panel_toggle).map(|_| Message::TogglePanel),
+        Subscription::run(notifications::events).map(Message::Notifications),
         window::close_events().map(Message::WindowClosed),
+        panel,
     ])
 }
 
@@ -156,8 +382,23 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 bar.theme_modified = modified;
                 bar.theme = theme::Theme::load();
             }
-            if bar.tooltip.is_some() {
+            if bar.tooltip.is_some() || bar.panel.is_some() {
                 bar.uptime = system::uptime().unwrap_or_default();
+            }
+            if let Some(finished) = bar.pomodoro.tick(Duration::from_secs(1)) {
+                return pomodoro_finished(finished);
+            }
+            let now = Instant::now();
+            let before = bar.popups.len();
+            bar.popups.retain(|popup| popup.expires.is_none_or(|expires| expires > now));
+            if bar.popups.len() != before {
+                return sync_popups(bar);
+            }
+            // Like ii, apply the schedule at startup and when it changes; manual toggles hold until then.
+            let scheduled = nightlight::scheduled(bar.now.time());
+            if bar.night_automatic && bar.night_schedule != Some(scheduled) {
+                bar.night_schedule = Some(scheduled);
+                return Task::perform(nightlight::set(scheduled, bar.night_temperature), Message::NightLight);
             }
         }
         Message::ActiveWindow(window) => bar.window = window,
@@ -193,6 +434,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
 
             let id = Id::unique();
             bar.tooltip = Some(id);
+            bar.surfaces.insert(id, Surface::Tooltip);
             return Task::done(Message::NewLayerShell { settings, id });
         }
         Message::Tray(tray::TrayEvent::Ready(client)) => bar.tray_client = Some(client),
@@ -202,7 +444,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             TrayEvent::Remove(address) => {
                 bar.tray_items.remove(&address);
-                if bar.tray_menu.as_ref().is_some_and(|open| open.address == address) {
+                if bar.open_menu().is_some_and(|(_, open)| open.address == address) {
                     return close_tray_menu(bar);
                 }
             }
@@ -246,26 +488,26 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             settings.anchor = PopupAnchor::Bottom;
             settings.gravity = PopupGravity::Bottom;
             let id = Id::unique();
-            bar.tray_menu = Some(OpenMenu { id, address, path: Vec::new() });
+            bar.tray_menu = Some(id);
+            bar.surfaces.insert(id, Surface::TrayMenu(OpenMenu { address, path: Vec::new() }));
             return close.chain(Task::done(Message::NewPopUp { settings, id }));
         }
         Message::NavigateTrayMenu(path) => {
-            let Some(open) = &bar.tray_menu else {
+            let Some((id, open)) = bar.open_menu() else {
                 return Task::none();
             };
             let has_header = bar.menu_title(&open.address).is_some();
             let Some(menu) = bar.tray_items.get(&open.address).and_then(|item| item.menu.as_ref()) else {
                 return Task::none();
             };
-            let (width, height) = menu::size(&menu::entries(menu, &path), !path.is_empty(), has_header);
-            let Some(open) = &mut bar.tray_menu else {
-                return Task::none();
-            };
-            open.path = path;
-            return Task::done(Message::SizeChange { id: open.id, size: (width, height + menu::GAP as u32) });
+            let size = menu::size(&menu::entries(menu, &path), !path.is_empty(), has_header);
+            if let Some(Surface::TrayMenu(open)) = bar.surfaces.get_mut(&id) {
+                open.path = path;
+            }
+            return Task::done(Message::SizeChange { id, size: (size.0, size.1 + menu::GAP as u32) });
         }
         Message::ActivateTrayMenuItem(submenu_id) => {
-            let Some(open) = &bar.tray_menu else {
+            let Some((_, open)) = bar.open_menu() else {
                 return Task::none();
             };
             let Some(menu_path) = bar.tray_items.get(&open.address).and_then(|item| item.menu_path.clone()) else {
@@ -275,34 +517,376 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return activate_tray(bar, request).chain(close_tray_menu(bar));
         }
         Message::WindowClosed(id) => {
-            if bar.tray_menu.as_ref().is_some_and(|open| open.id == id) {
+            bar.surfaces.remove(&id);
+            // The compositor dismissed it, for example a popup clicked outside.
+            if bar.tray_menu == Some(id) {
                 bar.tray_menu = None;
             }
-            if bar.closing_tray_menu.as_ref().is_some_and(|open| open.id == id) {
-                bar.closing_tray_menu = None;
+            if bar.popup_surface == Some(id) {
+                bar.popup_surface = None;
             }
-            if bar.closing_tooltip == Some(id) {
-                bar.closing_tooltip = None;
+            if bar.panel.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
+                return close_panel(bar);
             }
         }
         Message::HideTooltip => {
             if let Some(id) = bar.tooltip.take() {
-                bar.closing_tooltip = Some(id);
                 return Task::done(Message::RemoveWindow(id));
             }
+        }
+        Message::TogglePanel => {
+            return if bar.panel.is_some() { close_panel(bar) } else { open_panel(bar) };
+        }
+        Message::HoverPanel => {
+            let reopening = bar.panel_closed_at.is_some_and(|closed| closed.elapsed() < PANEL_REOPEN_DELAY);
+            if bar.panel.is_none() && !reopening {
+                return open_panel(bar);
+            }
+        }
+        Message::ClosePanel => return close_panel(bar),
+        Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+            // Escape closes the sub-panel first, then the panel.
+            if bar.subpanel.take().is_none() {
+                return close_panel(bar);
+            }
+        }
+        Message::OpenSubpanel(subpanel) => {
+            bar.subpanel = Some(subpanel);
+            bar.wifi_prompt = None;
+            bar.sink_picker_open = false;
+            if subpanel == subpanel::Subpanel::EyeProtection {
+                let output = hyprland::focused_monitor().unwrap_or_default();
+                return Task::batch([
+                    Task::perform(nightlight::gamma(), Message::Gamma),
+                    Task::perform(flashbang::is_enabled(), Message::ContentAdjustment),
+                    Task::perform(brightness::read(output), Message::Brightness),
+                ]);
+            }
+        }
+        Message::CloseSubpanel => bar.subpanel = None,
+        Message::SubpanelDetails(subpanel) => {
+            let [program, args @ ..] = subpanel.details() else {
+                return Task::none();
+            };
+            if let Err(err) = std::process::Command::new(program).args(args).spawn() {
+                eprintln!("zehll: cannot start {program}: {err}");
+            }
+            return close_panel(bar);
+        }
+        Message::Mixer(mixer) => {
+            for binary in mixer.streams.iter().filter_map(|stream| stream.binary.clone()) {
+                bar.app_icons.entry(binary).or_insert_with_key(|binary| tray::lookup(binary, None));
+            }
+            bar.mixer = Some(mixer);
+        }
+        Message::SetStreamVolume(index, percent) => return Task::future(mixer::set_volume(index, percent)).discard(),
+        Message::DragStreamVolume(index, percent) => bar.volume_drag = Some((index, percent)),
+        Message::ReleaseStreamVolume => {
+            if let Some((index, percent)) = bar.volume_drag.take() {
+                return Task::future(mixer::set_volume(index, percent)).discard();
+            }
+        }
+        Message::ToggleSinkPicker => bar.sink_picker_open = !bar.sink_picker_open,
+        Message::ScanFrame => bar.scan_frame = bar.scan_frame.wrapping_add(1),
+        Message::SetDefaultSink(name) => {
+            bar.sink_picker_open = false;
+            return Task::future(mixer::set_default_sink(name)).discard();
+        }
+        Message::BluetoothDevice(action) => return Task::future(bluetooth::run(action)).discard(),
+        Message::Wifi(wifi) => bar.wifi = Some(wifi),
+        Message::SelectWifi(ssid) => {
+            let Some(wifi) = &bar.wifi else {
+                return Task::none();
+            };
+            let Some(network) = wifi.networks.iter().find(|network| network.ssid == ssid) else {
+                return Task::none();
+            };
+            if network.secure && !network.known {
+                bar.wifi_prompt = Some(ssid);
+                bar.wifi_password.clear();
+                return Task::none();
+            }
+            bar.wifi_prompt = None;
+            return Task::future(network::connect(wifi.device.clone(), network.path.clone(), ssid, None)).discard();
+        }
+        Message::WifiPassword(password) => bar.wifi_password = password,
+        Message::SubmitWifiPassword => {
+            let (Some(wifi), Some(ssid)) = (&bar.wifi, bar.wifi_prompt.take()) else {
+                return Task::none();
+            };
+            let Some(network) = wifi.networks.iter().find(|network| network.ssid == ssid) else {
+                return Task::none();
+            };
+            let password = std::mem::take(&mut bar.wifi_password);
+            return Task::future(network::connect(wifi.device.clone(), network.path.clone(), ssid, Some(password))).discard();
+        }
+        Message::CalendarMonth(delta) => bar.calendar_month = panel::shift_month(bar.calendar_month, delta),
+        Message::ReloadShell => {
+            // Start a fresh instance and leave; it takes over the D-Bus names once this one exits.
+            match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+                Ok(_) => std::process::exit(0),
+                Err(err) => eprintln!("zehll: cannot restart: {err}"),
+            }
+        }
+        Message::Audio(audio) => bar.audio = Some(audio),
+        Message::ToggleMute(target) => return Task::future(audio::toggle_mute(target)).discard(),
+        Message::Network(network) => bar.network = Some(network),
+        Message::SetWifi(enabled) => return Task::future(network::set_wifi(enabled)).discard(),
+        Message::Bluetooth(bluetooth) => bar.bluetooth = Some(bluetooth),
+        Message::NightLight(temperature) => bar.night_light = temperature,
+        Message::SetNightLight(on) => return Task::perform(nightlight::set(on, bar.night_temperature), Message::NightLight),
+        Message::ToggleNightAutomatic => {
+            bar.night_automatic = !bar.night_automatic;
+            // Re-evaluate the schedule on the next tick when automatic mode comes back.
+            bar.night_schedule = None;
+            bar.save_state();
+        }
+        Message::ContentAdjustment(enabled) => bar.content_adjustment = enabled,
+        Message::SetContentAdjustment(enabled) => {
+            bar.content_adjustment = enabled;
+            bar.save_state();
+            return Task::perform(flashbang::set(enabled), Message::ContentAdjustment);
+        }
+        Message::Gamma(gamma) => bar.gamma = gamma,
+        Message::Brightness(monitor) => bar.brightness = monitor,
+        Message::DragLevel(level, value) => bar.level_drag = Some((level, value)),
+        Message::ReleaseLevel => {
+            // Like the volume sliders, apply once on release: these commands are slow.
+            let Some((level, value)) = bar.level_drag.take() else {
+                return Task::none();
+            };
+            match level {
+                subpanel::Level::Temperature => {
+                    bar.night_temperature = value;
+                    bar.save_state();
+                    if bar.night_light.is_some_and(nightlight::is_on) {
+                        return Task::perform(nightlight::set(true, value), Message::NightLight);
+                    }
+                }
+                subpanel::Level::Gamma => return Task::perform(nightlight::set_gamma(value), Message::Gamma),
+                subpanel::Level::Brightness => {
+                    let Some(monitor) = &mut bar.brightness else {
+                        return Task::none();
+                    };
+                    monitor.percent = value;
+                    return Task::future(brightness::set(monitor.clone(), value)).discard();
+                }
+            }
+        }
+        Message::ToggleKeepAwake => {
+            // Dropping the lock releases the inhibitor.
+            if bar.keep_awake.take().is_none() {
+                return Task::perform(idle::inhibit(), Message::KeepAwake);
+            }
+            bar.save_state();
+        }
+        Message::KeepAwake(lock) => {
+            bar.keep_awake = lock;
+            bar.save_state();
+        }
+        Message::Notifications(notifications::Event::Ready(handle)) => bar.notifications_handle = Some(handle),
+        Message::Notifications(notifications::Event::Notify(notification)) => {
+            let (id, timeout) = (notification.id, notification.timeout);
+            match bar.notifications.iter_mut().find(|existing| existing.id == id) {
+                Some(existing) => *existing = notification,
+                None => bar.notifications.insert(0, notification),
+            }
+            if !bar.do_not_disturb {
+                bar.popups.retain(|popup| popup.id != id);
+                bar.popups.insert(0, Popup { id, expires: timeout.map(|timeout| Instant::now() + timeout) });
+                bar.popups.truncate(popup::MAX_VISIBLE);
+                return sync_popups(bar);
+            }
+        }
+        Message::Notifications(notifications::Event::Close(id)) => {
+            bar.notifications.retain(|notification| notification.id != id);
+            return hide_popups(bar, |popup| popup.id == id);
+        }
+        Message::DismissNotification(id) => {
+            bar.notifications.retain(|notification| notification.id != id);
+            return notifications_closed(bar, vec![id]).chain(hide_popups(bar, |popup| popup.id == id));
+        }
+        Message::ClearNotifications => {
+            let ids = bar.notifications.drain(..).map(|notification| notification.id).collect();
+            return notifications_closed(bar, ids).chain(hide_popups(bar, |_| true));
+        }
+        Message::HidePopup(id) => return hide_popups(bar, |popup| popup.id == id),
+        Message::SelectTab(tab) => {
+            bar.panel_tab = tab;
+            if tab == panel::Tab::Todo {
+                bar.todo_items = todo::load();
+            }
+        }
+        Message::TodoInput(input) => bar.todo_input = input,
+        Message::TogglePomodoro => bar.pomodoro.running = !bar.pomodoro.running,
+        Message::ResetPomodoro => bar.pomodoro = pomodoro::Pomodoro::default(),
+        Message::SkipPomodoro => {
+            bar.pomodoro.skip();
+        }
+        Message::AddTodo => {
+            let content = bar.todo_input.trim().to_owned();
+            if !content.is_empty() {
+                bar.todo_input.clear();
+                update_todos(bar, |items| items.push(todo::Item { content, done: false }));
+            }
+        }
+        Message::ToggleTodo(index, content) => update_todos(bar, |items| todo::toggle(items, index, &content)),
+        Message::RemoveTodo(index, content) => update_todos(bar, |items| todo::remove(items, index, &content)),
+        Message::InvokeAction(id, key) => {
+            // The specification lets the server close a notification once an action ran.
+            let invoke = match bar.notifications_handle.clone() {
+                Some(handle) => Task::future(handle.invoke(id, key)).discard(),
+                None => Task::none(),
+            };
+            bar.notifications.retain(|notification| notification.id != id);
+            return invoke.chain(notifications_closed(bar, vec![id])).chain(hide_popups(bar, |popup| popup.id == id));
+        }
+        Message::ToggleDoNotDisturb => {
+            bar.do_not_disturb = !bar.do_not_disturb;
+            bar.save_state();
+            if bar.do_not_disturb {
+                return hide_popups(bar, |_| true);
+            }
+        }
+        Message::SetBluetooth(adapter, powered) => {
+            return Task::future(bluetooth::set_powered(adapter, powered)).discard();
+        }
+        Message::PowerMenu => {
+            if let Err(err) = std::process::Command::new("wlogout").spawn() {
+                eprintln!("zehll: cannot start wlogout: {err}");
+            }
+            return close_panel(bar);
         }
         _ => {}
     }
     Task::none()
 }
 
+fn pomodoro_finished(finished: pomodoro::Phase) -> Task<Message> {
+    let (summary, body) = match finished {
+        pomodoro::Phase::Focus => ("Focus done", "Time for a break."),
+        pomodoro::Phase::Break | pomodoro::Phase::LongBreak => ("Break over", "Back to focus."),
+    };
+    Task::future(notifications::send(summary, body)).discard()
+}
+
+/// Applies `change` to a fresh read of the todo file, since ii may have edited it meanwhile.
+fn update_todos(bar: &mut Bar, change: impl FnOnce(&mut Vec<todo::Item>)) {
+    let mut items = todo::load();
+    change(&mut items);
+    todo::save(&items);
+    bar.todo_items = items;
+}
+
+fn hide_popups(bar: &mut Bar, hide: impl Fn(&Popup) -> bool) -> Task<Message> {
+    let before = bar.popups.len();
+    bar.popups.retain(|popup| !hide(popup));
+    if bar.popups.len() == before {
+        return Task::none();
+    }
+    sync_popups(bar)
+}
+
+/// Creates, resizes or removes the popup surface to match the visible popups.
+fn sync_popups(bar: &mut Bar) -> Task<Message> {
+    let visible = bar.popups.iter().filter_map(|popup| bar.notifications.iter().find(|notification| notification.id == popup.id));
+    let height = popup::height(visible);
+    match (bar.popup_surface, height) {
+        (Some(id), 0) => {
+            bar.popup_surface = None;
+            Task::done(Message::RemoveWindow(id))
+        }
+        (Some(id), height) => Task::done(Message::SizeChange { id, size: (popup::WIDTH, height) }),
+        (None, 0) => Task::none(),
+        (None, height) => {
+            let Some(output) = hyprland::focused_monitor() else {
+                return Task::none();
+            };
+            let settings = NewLayerShellSettings {
+                size: Some((popup::WIDTH, height)),
+                layer: Layer::Overlay,
+                anchor: Anchor::Top | Anchor::Right,
+                exclusive_zone: Some(0),
+                margin: Some((8, 12, 0, 0)),
+                keyboard_interactivity: KeyboardInteractivity::None,
+                output_option: OutputOption::OutputName(output),
+                events_transparent: false,
+                namespace: Some(String::from("zehll-popups")),
+            };
+            let id = Id::unique();
+            bar.popup_surface = Some(id);
+            bar.surfaces.insert(id, Surface::Popups);
+            Task::done(Message::NewLayerShell { settings, id })
+        }
+    }
+}
+
+fn notifications_closed(bar: &Bar, ids: Vec<u32>) -> Task<Message> {
+    match bar.notifications_handle.clone() {
+        Some(handle) => Task::future(handle.closed(ids, notifications::DISMISSED)).discard(),
+        None => Task::none(),
+    }
+}
+
 fn close_tray_menu(bar: &mut Bar) -> Task<Message> {
-    let Some(open) = bar.tray_menu.take() else {
+    match bar.tray_menu.take() {
+        Some(id) => Task::done(Message::RemoveWindow(id)),
+        None => Task::none(),
+    }
+}
+
+fn open_panel(bar: &mut Bar) -> Task<Message> {
+    let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
-    let id = open.id;
-    bar.closing_tray_menu = Some(open);
-    Task::done(Message::RemoveWindow(id))
+    bar.uptime = system::uptime().unwrap_or_default();
+    bar.calendar_month = panel::first_of_month(bar.now.date_naive());
+    bar.todo_items = todo::load();
+
+    // Layer surfaces have no "click outside" event, so a transparent layer covering the screen
+    // catches those clicks. It is created first so the panel stacks above it.
+    let catcher = NewLayerShellSettings {
+        size: Some((0, 0)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+        exclusive_zone: Some(-1),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::OutputName(output.clone()),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-panel-catcher")),
+    };
+    let panel = NewLayerShellSettings {
+        size: Some((panel::WIDTH, 0)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Bottom | Anchor::Right,
+        exclusive_zone: Some(0),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::OutputName(output),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-panel")),
+    };
+    let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
+    bar.surfaces.insert(open.catcher, Surface::Catcher);
+    bar.surfaces.insert(open.panel, Surface::Panel);
+    let task = Task::done(Message::NewLayerShell { settings: catcher, id: open.catcher })
+        .chain(Task::done(Message::NewLayerShell { settings: panel, id: open.panel }))
+        .chain(Task::perform(nightlight::temperature(), Message::NightLight));
+    bar.panel = Some(open);
+    task
+}
+
+fn close_panel(bar: &mut Bar) -> Task<Message> {
+    let Some(open) = bar.panel.take() else {
+        return Task::none();
+    };
+    bar.subpanel = None;
+    bar.panel_closed_at = Some(Instant::now());
+    Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
 }
 
 fn activate_tray(bar: &Bar, request: ActivateRequest) -> Task<Message> {
@@ -318,11 +902,18 @@ fn activate_tray(bar: &Bar, request: ActivateRequest) -> Task<Message> {
 }
 
 fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
-    if bar.tooltip == Some(id) || bar.closing_tooltip == Some(id) {
-        return clock_tooltip(bar);
-    }
-    if let Some(open) = [&bar.tray_menu, &bar.closing_tray_menu].into_iter().flatten().find(|open| open.id == id) {
-        return tray_menu_view(bar, open);
+    match bar.surfaces.get(&id) {
+        Some(Surface::Tooltip) => return clock_tooltip(bar),
+        Some(Surface::TrayMenu(open)) => return tray_menu_view(bar, open),
+        Some(Surface::Panel) => return panel::view(bar),
+        Some(Surface::Popups) => return popup::view(bar),
+        Some(Surface::Catcher) => {
+            return mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::ClosePanel)
+                .on_right_press(Message::ClosePanel)
+                .into();
+        }
+        None => {}
     }
 
     let theme = bar.theme;
@@ -354,11 +945,12 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
             container(window).width(Length::FillPortion(1)).clip(true),
             container(clock).center_x(Length::FillPortion(1)),
             container(tray_view(bar, id)).align_right(Length::FillPortion(1)),
+            // Hovering the right edge opens the side panel, like ii.
+            mouse_area(Space::new().width(f32::from(BAR_PADDING)).height(Length::Fill)).on_enter(Message::HoverPanel),
         ]
         .height(Length::Fill)
         .align_y(Alignment::Center),
     )
-    .padding(Padding::ZERO.right(f32::from(BAR_PADDING)))
     .height(Length::Fill);
 
     container(column![content, line(theme.bar_border)])
@@ -376,7 +968,7 @@ fn tray_view(bar: &Bar, bar_id: Id) -> Element<'_, Message> {
         };
         let slot = Stack::new()
             .push(container(icon).center(30))
-            .push_under(shape(shape::Kind::Brackets, theme.bracket));
+            .push_under(shape(shape::Kind::BRACKETS, theme.bracket));
         let slot = button(slot)
             .on_press(Message::ActivateTray(address.clone()))
             .padding(0)
@@ -581,9 +1173,13 @@ fn glow_style(theme: theme::Theme, status: button::Status, blur: f32) -> button:
 }
 
 fn icon(name: &str) -> Element<'_, Message> {
+    icon_sized(name, 16.0)
+}
+
+fn icon_sized(name: &str, size: f32) -> Element<'_, Message> {
     text(name)
         .font(ICON_FONT)
-        .size(16)
+        .size(size)
         .shaping(text::Shaping::Advanced)
         .into()
 }
