@@ -1,8 +1,6 @@
 use chrono::{Datelike, NaiveDate};
-use iced::futures::{SinkExt, Stream};
 use iced::widget::{Column, Row, Space, Stack, button, column, container, row, text};
-use iced::{Alignment, Element, Length, Padding, stream};
-use tokio::signal::unix::{SignalKind, signal};
+use iced::{Alignment, Element, Length, Padding};
 
 use crate::{
     Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, Message, calendar, glow_style, line, panel_style, shape, slanted,
@@ -13,24 +11,6 @@ pub const WIDTH: u32 = 460;
 const PADDING: u16 = 16;
 const DAY_HEIGHT: f32 = 34.0;
 const WEEKDAYS: [&str; 7] = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
-
-/// Emits once per `SIGUSR1`, which a compositor keybind sends to toggle the panel.
-pub fn toggle_signals() -> impl Stream<Item = ()> {
-    stream::channel(1, async |mut output| {
-        let mut signals = match signal(SignalKind::user_defined1()) {
-            Ok(signals) => signals,
-            Err(err) => {
-                eprintln!("zehll: cannot listen for SIGUSR1: {err}");
-                return;
-            }
-        };
-        while signals.recv().await.is_some() {
-            if output.send(()).await.is_err() {
-                return;
-            }
-        }
-    })
-}
 
 pub fn view(bar: &Bar) -> Element<'_, Message> {
     let theme = bar.theme;

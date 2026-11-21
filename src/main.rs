@@ -3,6 +3,7 @@ mod hyprland;
 mod menu;
 mod panel;
 mod shape;
+mod shortcuts;
 mod system;
 mod theme;
 mod tray;
@@ -179,7 +180,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         time::every(Duration::from_secs(1)).map(|_| Message::Tick),
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
         Subscription::run(tray::events).map(Message::Tray),
-        Subscription::run(panel::toggle_signals).map(|_| Message::TogglePanel),
+        Subscription::run(shortcuts::panel_toggle).map(|_| Message::TogglePanel),
         window::close_events().map(Message::WindowClosed),
         keys,
     ])

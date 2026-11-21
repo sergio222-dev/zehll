@@ -5,7 +5,7 @@ Delivery: one commit per phase on the feature branch (ask-on-risk). Test runner:
 
 ## Specs
 
-- S1 Open/close like ii: "al pasar el mouse por el borde derecho superior de la status bar o apretando super+n para togglear, al hacer click fuera se cierra". Super+N sends `SIGUSR1` (`pkill -USR1 zehll`); Esc also closes.
+- S1 Open/close like ii: "al pasar el mouse por el borde derecho superior de la status bar o apretando super+n para togglear, al hacer click fuera se cierra". Toggle via the Hyprland global shortcut `zehll:panelToggle`; Esc also closes; Hyprland layer rules animate the slide-in.
 - S2 Header: uptime, reload and power actions (power opens `wlogout`). Edit and settings actions are omitted until they have a target.
 - S3 Calendar: month grid starting on Monday, today highlighted, previous/next month navigation; resets to the current month when the panel opens.
 - S4 Audio output and microphone toggles (mute), event-driven via `wpctl` / `pactl subscribe`.
@@ -32,3 +32,4 @@ Delivery: one commit per phase on the feature branch (ask-on-risk). Test runner:
 - L2 Decisions: open like ii (S1); notifications option B (S7). swaync currently owns `org.freedesktop.Notifications` and exposes only count/DND/clear over D-Bus.
 - L3 Engram mirror pending: Engram does not know the `zehll` project yet.
 - L4 T1 done: panel layer (460 px, Overlay, OnDemand keyboard) plus a transparent full-screen catcher created only while open; SIGUSR1 toggles; Escape closes; hover zone on the bar's right edge opens. Surfaces now live in a registry until `WindowClosed`, so closing surfaces never render as a bar. Calendar grid tests RED (todo!) then GREEN (4 tests pass). Verified with `pkill -USR1 -x zehll`: panel and catcher layers appear and disappear; screenshot matches the mockup. Not verified: hover, Escape and click-outside (need real input).
+- L5 (2026-11-21) User: "no podemos hacer que lo anime hyprland? el atajo lo podemos dejar registrado? no quiero agregar el shortcut todavia para no molestar a qs". S1 updated: the toggle is the Hyprland global shortcut `zehll:panelToggle` (protocol hyprland-global-shortcuts-v1), replacing SIGUSR1; the user's Super+N keeps opening ii for now. Slide-in comes from Hyprland layer rules for `^zehll-panel$` (slide right) and `^zehll-panel-catcher$` (no_anim), added to the user's rules.lua. Verified: `hyprctl globalshortcuts` lists `zehll:panelToggle`; `hyprctl dispatch 'hl.dsp.global("zehll:panelToggle")'` opens and closes the panel; config reload reports no errors.

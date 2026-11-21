@@ -30,10 +30,17 @@ Debug builds start noticeably slower because the GPU renderer is unoptimized.
 
 ## Side panel
 
-Hover the right edge of the bar to open the side panel. Click outside it or press Escape to close it. Zehll toggles the panel on `SIGUSR1`, so a Hyprland keybind can drive it:
+Hover the right edge of the bar to open the side panel. Click outside it or press Escape to close it. Zehll registers the Hyprland global shortcut `zehll:panelToggle`, so a keybind can toggle it:
 
 ```
-bind = SUPER, N, exec, pkill -USR1 -x zehll
+bind = SUPER, N, global, zehll:panelToggle
+```
+
+To slide the panel in from the right, add Hyprland layer rules for its namespaces:
+
+```
+layerrule = animation slide right, ^zehll-panel$
+layerrule = noanim, ^zehll-panel-catcher$
 ```
 
 The power button runs [wlogout](https://github.com/ArtsyMacaw/wlogout).
