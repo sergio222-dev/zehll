@@ -12,7 +12,7 @@ mod tray;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use iced::font::{Style as FontStyle, Weight};
@@ -29,6 +29,9 @@ use system_tray::menu::{MenuType, ToggleState, ToggleType};
 
 const BAR_HEIGHT: u32 = 44;
 const BAR_PADDING: u16 = 16;
+// After the panel closes, the pointer re-enters the bar's hover zone once the catcher is gone;
+// hovering does not reopen the panel within this window.
+const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
 const BODY_FONT: Font = Font::with_name("Barlow");
@@ -88,6 +91,7 @@ struct Bar {
     tray_items: BTreeMap<String, tray::TrayItem>,
     tray_menu: Option<Id>,
     panel: Option<OpenPanel>,
+    panel_closed_at: Option<Instant>,
     calendar_month: NaiveDate,
     audio: Option<audio::Audio>,
 }
@@ -126,6 +130,7 @@ impl Bar {
             tray_items: BTreeMap::new(),
             tray_menu: None,
             panel: None,
+            panel_closed_at: None,
             calendar_month: panel::first_of_month(Local::now().date_naive()),
             audio: None,
         };
@@ -161,7 +166,7 @@ enum Message {
     ActivateTrayMenuItem(i32),
     WindowClosed(Id),
     TogglePanel,
-    OpenPanel,
+    HoverPanel,
     ClosePanel,
     Key(keyboard::Event),
     CalendarMonth(i32),
@@ -340,8 +345,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::TogglePanel => {
             return if bar.panel.is_some() { close_panel(bar) } else { open_panel(bar) };
         }
-        Message::OpenPanel => {
-            if bar.panel.is_none() {
+        Message::HoverPanel => {
+            let reopening = bar.panel_closed_at.is_some_and(|closed| closed.elapsed() < PANEL_REOPEN_DELAY);
+            if bar.panel.is_none() && !reopening {
                 return open_panel(bar);
             }
         }
@@ -421,6 +427,7 @@ fn close_panel(bar: &mut Bar) -> Task<Message> {
     let Some(open) = bar.panel.take() else {
         return Task::none();
     };
+    bar.panel_closed_at = Some(Instant::now());
     Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
         true => Task::done(Message::RemoveWindow(id)),
         false => Task::none(),
@@ -483,7 +490,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
             container(clock).center_x(Length::FillPortion(1)),
             container(tray_view(bar, id)).align_right(Length::FillPortion(1)),
             // Hovering the right edge opens the side panel, like ii.
-            mouse_area(Space::new().width(f32::from(BAR_PADDING)).height(Length::Fill)).on_enter(Message::OpenPanel),
+            mouse_area(Space::new().width(f32::from(BAR_PADDING)).height(Length::Fill)).on_enter(Message::HoverPanel),
         ]
         .height(Length::Fill)
         .align_y(Alignment::Center),
