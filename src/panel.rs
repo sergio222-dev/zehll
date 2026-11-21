@@ -201,29 +201,45 @@ fn tile(bar: &Bar, toggle: Toggle) -> Element<'_, Message> {
         .padding(Padding::ZERO.right(8.0))
         .center_x(46)
         .center_y(56);
-    let label = column![
-        text(toggle.name).font(BODY_BOLD).size(14),
-        text(toggle.state).font(CONDENSED_BOLD).size(14).color(state_color),
-    ]
-    .spacing(1);
-    let content = row![slanted(icon, 10.0, block_color), label].spacing(10).align_y(Alignment::Center);
-    let tile = button(content)
-        .on_press(toggle.message)
+    let icon = slanted(icon, 10.0, block_color);
+    let label = container(
+        column![
+            text(toggle.name).font(BODY_BOLD).size(14),
+            text(toggle.state).font(CONDENSED_BOLD).size(14).color(state_color),
+        ]
+        .spacing(1),
+    )
+    .padding(Padding::ZERO.left(10.0))
+    .center_y(56)
+    .width(Length::Fill);
+    let tile_style = move |_: &iced::Theme, status| {
+        let mut style = glow_style(theme, status, 10.0);
+        if style.background.is_none() {
+            style.background = Some(theme.popup_background.into());
+            style.border = iced::Border { color: theme.border, width: 1.0, radius: 0.0.into() };
+        }
+        style
+    };
+
+    let Some(subpanel) = toggle.subpanel else {
+        return button(row![icon, label].align_y(Alignment::Center))
+            .on_press(toggle.message)
+            .padding(0)
+            .width(Length::Fill)
+            .height(56)
+            .style(tile_style)
+            .into();
+    };
+    // Like Android quick settings: the icon toggles, the rest of the tile opens the sub-panel.
+    let toggle_button = button(icon).on_press(toggle.message).padding(0).style(|_, _| button::Style::default());
+    let open = Message::OpenSubpanel(subpanel);
+    let tile = button(row![toggle_button, label].align_y(Alignment::Center))
+        .on_press(open.clone())
         .padding(0)
         .width(Length::Fill)
         .height(56)
-        .style(move |_, status| {
-            let mut style = glow_style(theme, status, 10.0);
-            if style.background.is_none() {
-                style.background = Some(theme.popup_background.into());
-                style.border = iced::Border { color: theme.border, width: 1.0, radius: 0.0.into() };
-            }
-            style
-        });
-    match toggle.subpanel {
-        Some(subpanel) => iced::widget::mouse_area(tile).on_right_press(Message::OpenSubpanel(subpanel)).into(),
-        None => tile.into(),
-    }
+        .style(tile_style);
+    iced::widget::mouse_area(tile).on_right_press(open).into()
 }
 
 fn notifications_view(bar: &Bar) -> Element<'_, Message> {
