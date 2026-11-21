@@ -26,7 +26,16 @@ pub struct Audio {
 
 /// Streams the default output and input devices, reading them again when PipeWire reports a change.
 pub fn events() -> impl Stream<Item = Audio> {
-    stream::channel(4, async |mut output| {
+    watch(read)
+}
+
+/// Runs `read` now and again after each burst of PipeWire changes, emitting only new values.
+pub fn watch<T, F>(read: fn() -> F) -> impl Stream<Item = T>
+where
+    T: Clone + PartialEq + Send + 'static,
+    F: Future<Output = T> + Send + 'static,
+{
+    stream::channel(4, async move |mut output| {
         let child = Command::new("pactl").arg("subscribe").stdout(Stdio::piped()).kill_on_drop(true).spawn();
         let mut child = match child {
             Ok(child) => child,

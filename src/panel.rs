@@ -2,9 +2,10 @@ use chrono::{Datelike, NaiveDate};
 use iced::widget::{Column, Row, Space, Stack, button, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Padding};
 
+use crate::subpanel::Subpanel;
 use crate::{
     BODY_BOLD, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, audio, calendar, glow_style, line,
-    BODY_FONT, network, nightlight, notifications, panel_style, pomodoro, shape, slanted, system,
+    BODY_FONT, network, nightlight, notifications, panel_style, pomodoro, shape, slanted, subpanel, system,
 };
 
 pub const WIDTH: u32 = 460;
@@ -32,6 +33,20 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     let content = container(content).width(Length::Fill).height(Length::Fill).style(move |_| {
         iced::widget::container::background(theme.bar_background)
     });
+    let content: Element<'_, Message> = match bar.subpanel {
+        // The sub-panel floats over the dimmed panel; clicking the dimmed area closes it.
+        Some(subpanel) => Stack::new()
+            .push(content)
+            .push(
+                iced::widget::mouse_area(
+                    container(Space::new()).width(Length::Fill).height(Length::Fill).style(|_| container::background(iced::Color { a: 0.6, ..iced::Color::BLACK })),
+                )
+                .on_press(Message::CloseSubpanel),
+            )
+            .push(container(subpanel::view(bar, subpanel)).center(Length::Fill))
+            .into(),
+        None => content.into(),
+    };
     row![line(theme.bar_border).width(1).height(Length::Fill), content].into()
 }
 
@@ -63,7 +78,7 @@ fn action_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'
     let theme = bar.theme;
     let content = Stack::new()
         .push(container(crate::icon_sized(icon, 18.0)).center(34))
-        .push_under(crate::shape(shape::Kind::Brackets, theme.bracket));
+        .push_under(crate::shape(shape::Kind::BRACKETS, theme.bracket));
     button(content)
         .on_press(message)
         .padding(0)
@@ -77,6 +92,8 @@ struct Toggle {
     state: String,
     on: bool,
     message: Message,
+    /// Opened with a right click, like ii.
+    subpanel: Option<Subpanel>,
 }
 
 fn quick_settings(bar: &Bar) -> Element<'_, Message> {
@@ -93,6 +110,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             state: network.label(),
             on: network.connected,
             message: Message::SetWifi(!network.wifi_enabled),
+            subpanel: None,
         });
     }
     if let Some(bluetooth) = &bar.bluetooth {
@@ -106,6 +124,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             state: bluetooth.label(),
             on: bluetooth.powered,
             message: Message::SetBluetooth(bluetooth.adapter.clone(), !bluetooth.powered),
+            subpanel: None,
         });
     }
     if let Some(audio) = &bar.audio {
@@ -116,6 +135,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             state: if output.muted { String::from("MUTED") } else { format!("UNMUTED · {:.0}%", output.volume * 100.0) },
             on: !output.muted,
             message: Message::ToggleMute(audio::OUTPUT),
+            subpanel: Some(Subpanel::Audio),
         });
         toggles.push(Toggle {
             icon: if audio.input.muted { "mic_off" } else { "mic" },
@@ -123,6 +143,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             state: String::from(if audio.input.muted { "MUTED" } else { "LIVE" }),
             on: !audio.input.muted,
             message: Message::ToggleMute(audio::INPUT),
+            subpanel: None,
         });
     }
     if let Some(temperature) = bar.night_light {
@@ -137,6 +158,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             },
             on,
             message: Message::SetNightLight(!on),
+            subpanel: None,
         });
     }
     let keep_awake = bar.keep_awake.is_some();
@@ -146,6 +168,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
         state: String::from(if keep_awake { "ACTIVE" } else { "OFF" }),
         on: keep_awake,
         message: Message::ToggleKeepAwake,
+        subpanel: None,
     });
 
     let on = toggles.iter().filter(|toggle| toggle.on).count();
@@ -184,7 +207,7 @@ fn tile(bar: &Bar, toggle: Toggle) -> Element<'_, Message> {
     ]
     .spacing(1);
     let content = row![slanted(icon, 10.0, block_color), label].spacing(10).align_y(Alignment::Center);
-    button(content)
+    let tile = button(content)
         .on_press(toggle.message)
         .padding(0)
         .width(Length::Fill)
@@ -196,8 +219,11 @@ fn tile(bar: &Bar, toggle: Toggle) -> Element<'_, Message> {
                 style.border = iced::Border { color: theme.border, width: 1.0, radius: 0.0.into() };
             }
             style
-        })
-        .into()
+        });
+    match toggle.subpanel {
+        Some(subpanel) => iced::widget::mouse_area(tile).on_right_press(Message::OpenSubpanel(subpanel)).into(),
+        None => tile.into(),
+    }
 }
 
 fn notifications_view(bar: &Bar) -> Element<'_, Message> {
@@ -219,7 +245,7 @@ fn notifications_view(bar: &Bar) -> Element<'_, Message> {
     let list: Element<'_, Message> = if bar.notifications.is_empty() {
         let bell = Stack::new()
             .push(container(text("notifications").font(ICON_FONT).size(34).color(theme.text_muted).shaping(text::Shaping::Advanced)).center(72))
-            .push_under(crate::shape(shape::Kind::Brackets, theme.bracket));
+            .push_under(crate::shape(shape::Kind::BRACKETS, theme.bracket));
         let empty = column![bell, text("ALL CLEAR").font(CONDENSED_BOLD).size(16).color(theme.text_muted)]
             .spacing(12)
             .align_x(Alignment::Center);
@@ -320,7 +346,7 @@ fn footer_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'
     let theme = bar.theme;
     let content = Stack::new()
         .push(container(crate::icon_sized(icon, 18.0)).center_x(40).center_y(36))
-        .push_under(crate::shape(shape::Kind::Brackets, theme.bracket));
+        .push_under(crate::shape(shape::Kind::BRACKETS, theme.bracket));
     button(content).on_press(message).padding(0).style(move |_, status| glow_style(theme, status, 10.0)).into()
 }
 

@@ -5,6 +5,7 @@ mod dbus;
 mod hyprland;
 mod idle;
 mod menu;
+mod mixer;
 mod network;
 mod nightlight;
 mod notifications;
@@ -14,6 +15,7 @@ mod popup;
 mod shape;
 mod shortcuts;
 mod state;
+mod subpanel;
 mod system;
 mod theme;
 mod todo;
@@ -122,6 +124,10 @@ struct Bar {
     todo_items: Vec<todo::Item>,
     todo_input: String,
     pomodoro: pomodoro::Pomodoro,
+    subpanel: Option<subpanel::Subpanel>,
+    mixer: Option<mixer::Mixer>,
+    // Icons of audio streams by executable name, looked up once.
+    app_icons: HashMap<String, Option<tray::Icon>>,
 }
 
 struct Popup {
@@ -182,6 +188,9 @@ impl Bar {
             todo_items: Vec::new(),
             todo_input: String::new(),
             pomodoro: pomodoro::Pomodoro::default(),
+            subpanel: None,
+            mixer: None,
+            app_icons: HashMap::new(),
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -253,6 +262,12 @@ enum Message {
     TogglePomodoro,
     ResetPomodoro,
     SkipPomodoro,
+    OpenSubpanel(subpanel::Subpanel),
+    CloseSubpanel,
+    SubpanelDetails(subpanel::Subpanel),
+    Mixer(mixer::Mixer),
+    SetStreamVolume(u32, u32),
+    SetDefaultSink(String),
 }
 
 fn namespace() -> String {
@@ -261,8 +276,13 @@ fn namespace() -> String {
 
 fn subscription(bar: &Bar) -> Subscription<Message> {
     // Keys (Escape) and the panel's data sources only run while the panel is open.
+    let mixer = match bar.subpanel {
+        Some(subpanel::Subpanel::Audio) => Subscription::run(mixer::events).map(Message::Mixer),
+        _ => Subscription::none(),
+    };
     let panel = match bar.panel {
         Some(_) => Subscription::batch([
+            mixer,
             keyboard::listen().map(Message::Key),
             Subscription::run(audio::events).map(Message::Audio),
             Subscription::run(network::events).map(Message::Network),
@@ -453,8 +473,30 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::ClosePanel => return close_panel(bar),
         Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+            // Escape closes the sub-panel first, then the panel.
+            if bar.subpanel.take().is_none() {
+                return close_panel(bar);
+            }
+        }
+        Message::OpenSubpanel(subpanel) => bar.subpanel = Some(subpanel),
+        Message::CloseSubpanel => bar.subpanel = None,
+        Message::SubpanelDetails(subpanel) => {
+            let [program, args @ ..] = subpanel.details() else {
+                return Task::none();
+            };
+            if let Err(err) = std::process::Command::new(program).args(args).spawn() {
+                eprintln!("zehll: cannot start {program}: {err}");
+            }
             return close_panel(bar);
         }
+        Message::Mixer(mixer) => {
+            for binary in mixer.streams.iter().filter_map(|stream| stream.binary.clone()) {
+                bar.app_icons.entry(binary).or_insert_with_key(|binary| tray::lookup(binary, None));
+            }
+            bar.mixer = Some(mixer);
+        }
+        Message::SetStreamVolume(index, percent) => return Task::future(mixer::set_volume(index, percent)).discard(),
+        Message::SetDefaultSink(name) => return Task::future(mixer::set_default_sink(name)).discard(),
         Message::CalendarMonth(delta) => bar.calendar_month = panel::shift_month(bar.calendar_month, delta),
         Message::ReloadShell => {
             // Start a fresh instance and leave; it takes over the D-Bus names once this one exits.
@@ -678,6 +720,7 @@ fn close_panel(bar: &mut Bar) -> Task<Message> {
     let Some(open) = bar.panel.take() else {
         return Task::none();
     };
+    bar.subpanel = None;
     bar.panel_closed_at = Some(Instant::now());
     Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
         true => Task::done(Message::RemoveWindow(id)),
@@ -764,7 +807,7 @@ fn tray_view(bar: &Bar, bar_id: Id) -> Element<'_, Message> {
         };
         let slot = Stack::new()
             .push(container(icon).center(30))
-            .push_under(shape(shape::Kind::Brackets, theme.bracket));
+            .push_under(shape(shape::Kind::BRACKETS, theme.bracket));
         let slot = button(slot)
             .on_press(Message::ActivateTray(address.clone()))
             .padding(0)
