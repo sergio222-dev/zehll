@@ -50,6 +50,10 @@ Quick settings toggle Wi-Fi, Bluetooth, audio output and microphone mute, night 
 - Night light switches [hyprsunset](https://github.com/hyprwm/hyprsunset) between 5000 K and 6000 K. It turns on automatically from 19:00 to 06:30; a manual toggle holds until the next change of the schedule.
 - Keep awake holds a logind idle inhibitor, which hypridle honors. It is remembered across restarts in `~/.local/state/zehll/state.json`.
 
+## Notifications
+
+Zehll is a notification daemon (`org.freedesktop.Notifications`); notifications are listed in the side panel, with do not disturb and clear all. If another daemon such as swaync owns the name, Zehll waits in the D-Bus queue and takes over when that daemon exits, so disable the other daemon to use Zehll's.
+
 ## Theme
 
 The bar uses a tactical HUD style: a fixed navy base with slanted panels and glowing highlights. Its accent colors come from a Material 3 palette in matugen's `colors.json` format, read from `~/.config/zehll/theme.json` (or `$XDG_CONFIG_HOME/zehll/theme.json`). Missing keys fall back to orange and cyan.

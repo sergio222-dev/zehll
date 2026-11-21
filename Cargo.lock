@@ -5383,6 +5383,7 @@ name = "zehll"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "enumflags2",
  "freedesktop-icons",
  "iced",
  "iced_layershell",

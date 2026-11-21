@@ -7,6 +7,7 @@ mod idle;
 mod menu;
 mod network;
 mod nightlight;
+mod notifications;
 mod panel;
 mod shape;
 mod shortcuts;
@@ -107,6 +108,10 @@ struct Bar {
     night_schedule: Option<bool>,
     // logind idle inhibitor lock held while "keep awake" is on.
     keep_awake: Option<Arc<zbus::zvariant::OwnedFd>>,
+    notifications_handle: Option<notifications::Handle>,
+    // Newest first.
+    notifications: Vec<notifications::Notification>,
+    do_not_disturb: bool,
 }
 
 enum Surface {
@@ -130,6 +135,7 @@ struct OpenPanel {
 
 impl Bar {
     fn new() -> (Self, Task<Message>) {
+        let state = state::State::load();
         let bar = Self {
             theme: theme::Theme::load(),
             theme_modified: theme::modified(),
@@ -151,12 +157,19 @@ impl Bar {
             night_light: None,
             night_schedule: None,
             keep_awake: None,
+            notifications_handle: None,
+            notifications: Vec::new(),
+            do_not_disturb: state.do_not_disturb,
         };
-        let restore = match state::State::load().keep_awake {
+        let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
             false => Task::none(),
         };
         (bar, restore)
+    }
+
+    fn save_state(&self) {
+        state::State { keep_awake: self.keep_awake.is_some(), do_not_disturb: self.do_not_disturb }.save();
     }
 
     fn open_menu(&self) -> Option<(Id, &OpenMenu)> {
@@ -204,6 +217,10 @@ enum Message {
     SetNightLight(bool),
     ToggleKeepAwake,
     KeepAwake(Option<Arc<zbus::zvariant::OwnedFd>>),
+    Notifications(notifications::Event),
+    DismissNotification(u32),
+    ClearNotifications,
+    ToggleDoNotDisturb,
 }
 
 fn namespace() -> String {
@@ -226,6 +243,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
         Subscription::run(tray::events).map(Message::Tray),
         Subscription::run(shortcuts::panel_toggle).map(|_| Message::TogglePanel),
+        Subscription::run(notifications::events).map(Message::Notifications),
         window::close_events().map(Message::WindowClosed),
         panel,
     ])
@@ -413,11 +431,31 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.keep_awake.take().is_none() {
                 return Task::perform(idle::inhibit(), Message::KeepAwake);
             }
-            state::State { keep_awake: false }.save();
+            bar.save_state();
         }
         Message::KeepAwake(lock) => {
             bar.keep_awake = lock;
-            state::State { keep_awake: bar.keep_awake.is_some() }.save();
+            bar.save_state();
+        }
+        Message::Notifications(notifications::Event::Ready(handle)) => bar.notifications_handle = Some(handle),
+        Message::Notifications(notifications::Event::Notify(notification)) => {
+            match bar.notifications.iter_mut().find(|existing| existing.id == notification.id) {
+                Some(existing) => *existing = notification,
+                None => bar.notifications.insert(0, notification),
+            }
+        }
+        Message::Notifications(notifications::Event::Close(id)) => bar.notifications.retain(|notification| notification.id != id),
+        Message::DismissNotification(id) => {
+            bar.notifications.retain(|notification| notification.id != id);
+            return notifications_closed(bar, vec![id]);
+        }
+        Message::ClearNotifications => {
+            let ids = bar.notifications.drain(..).map(|notification| notification.id).collect();
+            return notifications_closed(bar, ids);
+        }
+        Message::ToggleDoNotDisturb => {
+            bar.do_not_disturb = !bar.do_not_disturb;
+            bar.save_state();
         }
         Message::SetBluetooth(adapter, powered) => {
             return Task::future(bluetooth::set_powered(adapter, powered)).discard();
@@ -431,6 +469,13 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         _ => {}
     }
     Task::none()
+}
+
+fn notifications_closed(bar: &Bar, ids: Vec<u32>) -> Task<Message> {
+    match bar.notifications_handle.clone() {
+        Some(handle) => Task::future(handle.closed(ids, notifications::DISMISSED)).discard(),
+        None => Task::none(),
+    }
 }
 
 fn close_tray_menu(bar: &mut Bar) -> Task<Message> {

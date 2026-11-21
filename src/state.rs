@@ -4,6 +4,7 @@ use std::path::PathBuf;
 #[derive(Debug, Default)]
 pub struct State {
     pub keep_awake: bool,
+    pub do_not_disturb: bool,
 }
 
 impl State {
@@ -12,12 +13,15 @@ impl State {
             .ok()
             .and_then(|content| serde_json::from_str(&content).ok())
             .unwrap_or_default();
-        Self { keep_awake: state["keep_awake"].as_bool().unwrap_or(false) }
+        Self {
+            keep_awake: state["keep_awake"].as_bool().unwrap_or(false),
+            do_not_disturb: state["do_not_disturb"].as_bool().unwrap_or(false),
+        }
     }
 
     pub fn save(&self) {
         let path = path();
-        let content = serde_json::json!({ "keep_awake": self.keep_awake }).to_string();
+        let content = serde_json::json!({ "keep_awake": self.keep_awake, "do_not_disturb": self.do_not_disturb }).to_string();
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, content));
         if let Err(err) = result {
             eprintln!("zehll: cannot save {}: {err}", path.display());

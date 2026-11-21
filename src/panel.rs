@@ -1,10 +1,10 @@
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{Column, Row, Space, Stack, button, column, container, row, text};
+use iced::widget::{Column, Row, Space, Stack, button, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::{
     BODY_BOLD, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, audio, calendar, glow_style, line,
-    network, nightlight, panel_style, shape, slanted, system,
+    network, nightlight, notifications, panel_style, shape, slanted, system,
 };
 
 pub const WIDTH: u32 = 460;
@@ -16,7 +16,7 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     let theme = bar.theme;
     let content = column![header(bar)]
         .push(quick_settings(bar))
-        .push(Space::new().height(Length::Fill))
+        .push(notifications_view(bar))
         .push(calendar_view(bar))
         .spacing(14)
         .padding(PADDING);
@@ -189,6 +189,97 @@ fn tile(bar: &Bar, toggle: Toggle) -> Element<'_, Message> {
             style
         })
         .into()
+}
+
+fn notifications_view(bar: &Bar) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let count = bar.notifications.len();
+    let strip = row![
+        text("NOTIFICATIONS").font(CONDENSED).size(14).color(theme.accent),
+        Space::new().width(Length::Fill),
+        text(if bar.do_not_disturb { String::from("DO NOT DISTURB") } else { format!("{count} NEW") })
+            .font(CONDENSED_BOLD)
+            .size(14)
+            .color(theme.text_muted),
+    ]
+    .align_y(Alignment::Center)
+    .padding([0, 14])
+    .height(26);
+    let strip = container(slanted(strip, 10.0, theme.section_background)).padding(Padding::ZERO.right(16.0));
+
+    let list: Element<'_, Message> = if bar.notifications.is_empty() {
+        let bell = Stack::new()
+            .push(container(text("notifications").font(ICON_FONT).size(34).color(theme.text_muted).shaping(text::Shaping::Advanced)).center(72))
+            .push_under(crate::shape(shape::Kind::Brackets, theme.bracket));
+        let empty = column![bell, text("ALL CLEAR").font(CONDENSED_BOLD).size(16).color(theme.text_muted)]
+            .spacing(12)
+            .align_x(Alignment::Center);
+        container(empty).center(Length::Fill).into()
+    } else {
+        let cards = Column::with_children(bar.notifications.iter().map(|notification| notification_card(bar, notification)))
+            .spacing(8)
+            .padding(Padding::ZERO.right(8.0));
+        scrollable(cards).height(Length::Fill).into()
+    };
+
+    let footer = row![
+        footer_button(bar, if bar.do_not_disturb { "notifications_off" } else { "notifications" }, Message::ToggleDoNotDisturb),
+        container(text(format!("{count} NOTIFICATIONS")).font(CONDENSED_BOLD).size(15).color(theme.text_muted))
+            .center_x(Length::Fill)
+            .center_y(36)
+            .style(move |_| iced::widget::container::Style {
+                border: iced::Border { color: theme.border, width: 1.0, radius: 0.0.into() },
+                ..Default::default()
+            }),
+        footer_button(bar, "delete_sweep", Message::ClearNotifications),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .padding([0, 10]);
+
+    container(column![strip, container(list).padding([0, 10]).height(Length::Fill), footer].spacing(10))
+        .padding(Padding::ZERO.bottom(10.0).left(0.0))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(move |_| panel_style(theme))
+        .into()
+}
+
+fn notification_card<'a>(bar: &'a Bar, notification: &'a notifications::Notification) -> Element<'a, Message> {
+    let theme = bar.theme;
+    let header = row![
+        text(notification.app_name.to_uppercase()).font(CONDENSED_BOLD).size(13).color(theme.accent),
+        Space::new().width(Length::Fill),
+        text(notification.time.format("%H:%M").to_string()).font(CONDENSED_BOLD).size(13).color(theme.text_muted),
+        button(text("close").font(ICON_FONT).size(16).shaping(text::Shaping::Advanced))
+            .on_press(Message::DismissNotification(notification.id))
+            .padding(2)
+            .style(move |_, status| glow_style(theme, status, 6.0)),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    let mut content = column![header, text(&notification.summary).font(BODY_BOLD).size(14)].spacing(4);
+    if !notification.body.is_empty() {
+        content = content.push(text(&notification.body).size(13).color(theme.text_muted));
+    }
+    let border = if notification.critical { theme.accent } else { theme.border };
+    container(content)
+        .padding([8, 10])
+        .width(Length::Fill)
+        .style(move |_| iced::widget::container::Style {
+            background: Some(theme.section_background.into()),
+            border: iced::Border { color: border, width: 1.0, radius: 0.0.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+fn footer_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'a, Message> {
+    let theme = bar.theme;
+    let content = Stack::new()
+        .push(container(crate::icon_sized(icon, 18.0)).center_x(40).center_y(36))
+        .push_under(crate::shape(shape::Kind::Brackets, theme.bracket));
+    button(content).on_press(message).padding(0).style(move |_, status| glow_style(theme, status, 10.0)).into()
 }
 
 fn calendar_view(bar: &Bar) -> Element<'_, Message> {
