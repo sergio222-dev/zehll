@@ -26,7 +26,7 @@ mod todo;
 mod tray;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -157,6 +157,8 @@ struct Bar {
     meetings_status: meetings::Status,
     // `gcal.py auth` is waiting for the browser sign-in.
     meetings_signing_in: bool,
+    // Meeting alerts already raised, so each fires once (see `meetings::due_alerts`).
+    meetings_fired: HashSet<String>,
     // Calendar popover and its click catcher.
     calendar: Option<OpenPanel>,
     // Day whose agenda the calendar popover shows.
@@ -246,6 +248,7 @@ impl Bar {
             meetings: Vec::new(),
             meetings_status: meetings::Status::Ok,
             meetings_signing_in: false,
+            meetings_fired: HashSet::new(),
             calendar: None,
             calendar_day: Local::now().date_naive(),
         };
@@ -426,28 +429,32 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.tooltip.is_some() || bar.panel.is_some() {
                 bar.uptime = system::uptime().unwrap_or_default();
             }
+            // Every step runs each second; none returns early and skips the ones after it.
+            let mut tasks = Vec::new();
             // The pill disappears under the pointer when its meeting starts, without a pointer exit.
             let meeting_tooltip = bar.tooltip.and_then(|id| bar.surfaces.get(&id));
             if matches!(meeting_tooltip, Some(Surface::Tooltip(Tooltip::Meeting)))
                 && meetings::next_meeting(&bar.meetings, bar.now.naive_local()).is_none()
             {
-                return Task::done(Message::HideTooltip);
+                tasks.push(Task::done(Message::HideTooltip));
             }
+            tasks.extend(meeting_alerts(bar));
             if let Some(finished) = bar.pomodoro.tick(Duration::from_secs(1)) {
-                return pomodoro_finished(finished);
+                tasks.push(pomodoro_finished(finished));
             }
             let now = Instant::now();
             let before = bar.popups.len();
             bar.popups.retain(|popup| popup.expires.is_none_or(|expires| expires > now));
             if bar.popups.len() != before {
-                return sync_popups(bar);
+                tasks.push(sync_popups(bar));
             }
             // Like ii, apply the schedule at startup and when it changes; manual toggles hold until then.
             let scheduled = nightlight::scheduled(bar.now.time());
             if bar.night_automatic && bar.night_schedule != Some(scheduled) {
                 bar.night_schedule = Some(scheduled);
-                return Task::perform(nightlight::set(scheduled, bar.night_temperature), Message::NightLight);
+                tasks.push(Task::perform(nightlight::set(scheduled, bar.night_temperature), Message::NightLight));
             }
+            return Task::batch(tasks);
         }
         Message::ActiveWindow(window) => bar.window = window,
         Message::ShowTooltip(tooltip) => {
@@ -862,15 +869,31 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
     Task::none()
 }
 
+/// Raises the meeting alerts due now: the heads-up notification 5 minutes before.
+fn meeting_alerts(bar: &mut Bar) -> Vec<Task<Message>> {
+    let now = bar.now.naive_local();
+    meetings::due_alerts(&bar.meetings, now, &mut bar.meetings_fired)
+        .into_iter()
+        .filter_map(|(kind, meeting)| match kind {
+            meetings::AlertKind::Warning => {
+                let (summary, body) = meetings::warning_text(meeting);
+                let send = async move { notifications::send("Calendar", "x-office-calendar", &summary, &body).await };
+                Some(Task::future(send).discard())
+            }
+            // Meetings starting now get no card yet.
+            meetings::AlertKind::Start => None,
+        })
+        .collect()
+}
+
 fn pomodoro_finished(finished: pomodoro::Phase) -> Task<Message> {
     let (summary, body) = match finished {
         pomodoro::Phase::Focus => ("Focus done", "Time for a break."),
         pomodoro::Phase::Break | pomodoro::Phase::LongBreak => ("Break over", "Back to focus."),
     };
-    Task::future(notifications::send(summary, body)).discard()
+    Task::future(notifications::send("Zehll", "timer", summary, body)).discard()
 }
 
-/// Applies `change` to a fresh read of the todo file, since ii may have edited it meanwhile.
 /// Fetches the meetings of the month shown in the calendar and of the next two days.
 fn fetch_meetings(bar: &Bar) -> Task<Message> {
     let range = meetings::fetch_range(bar.calendar_month, bar.now.date_naive());
@@ -879,6 +902,7 @@ fn fetch_meetings(bar: &Bar) -> Task<Message> {
     })
 }
 
+/// Applies `change` to a fresh read of the todo file, since ii may have edited it meanwhile.
 fn update_todos(bar: &mut Bar, change: impl FnOnce(&mut Vec<todo::Item>)) {
     let mut items = todo::load();
     change(&mut items);

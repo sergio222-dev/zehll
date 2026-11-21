@@ -246,6 +246,11 @@ pub const LEAD_MINUTES: i64 = 5;
 /// How long after the start a missed alert card still opens (e.g. after a late fetch).
 pub const LATE_MINUTES: i64 = 5;
 
+/// Summary and body of the heads-up notification: the title and `Starts in 5 minutes`.
+pub fn warning_text(meeting: &Meeting) -> (String, String) {
+    (meeting.title.clone(), format!("Starts in {LEAD_MINUTES} minutes"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AlertKind {
     /// `Starts in 5 minutes` notification, no sound.
@@ -456,6 +461,12 @@ mod tests {
 
     fn due(meetings: &[Meeting], now: NaiveDateTime, fired: &mut HashSet<String>) -> Vec<(AlertKind, String)> {
         due_alerts(meetings, now, fired).into_iter().map(|(kind, m)| (kind, m.id.clone())).collect()
+    }
+
+    #[test]
+    fn warning_notification_text() {
+        let m = meeting("Design review", at(21, 10, 0), at(21, 10, 45));
+        assert_eq!(warning_text(&m), ("Design review".to_string(), "Starts in 5 minutes".to_string()));
     }
 
     #[test]
