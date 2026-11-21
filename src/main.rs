@@ -1,3 +1,4 @@
+mod audio;
 mod calendar;
 mod hyprland;
 mod menu;
@@ -88,6 +89,7 @@ struct Bar {
     tray_menu: Option<Id>,
     panel: Option<OpenPanel>,
     calendar_month: NaiveDate,
+    audio: Option<audio::Audio>,
 }
 
 enum Surface {
@@ -125,6 +127,7 @@ impl Bar {
             tray_menu: None,
             panel: None,
             calendar_month: panel::first_of_month(Local::now().date_naive()),
+            audio: None,
         };
         (bar, Task::none())
     }
@@ -164,6 +167,8 @@ enum Message {
     CalendarMonth(i32),
     ReloadShell,
     PowerMenu,
+    Audio(audio::Audio),
+    ToggleMute(&'static str),
 }
 
 fn namespace() -> String {
@@ -171,9 +176,12 @@ fn namespace() -> String {
 }
 
 fn subscription(bar: &Bar) -> Subscription<Message> {
-    // Keys are only needed to close the panel with Escape.
-    let keys = match bar.panel {
-        Some(_) => keyboard::listen().map(Message::Key),
+    // Keys (Escape) and the panel's data sources only run while the panel is open.
+    let panel = match bar.panel {
+        Some(_) => Subscription::batch([
+            keyboard::listen().map(Message::Key),
+            Subscription::run(audio::events).map(Message::Audio),
+        ]),
         None => Subscription::none(),
     };
     Subscription::batch([
@@ -182,7 +190,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Subscription::run(tray::events).map(Message::Tray),
         Subscription::run(shortcuts::panel_toggle).map(|_| Message::TogglePanel),
         window::close_events().map(Message::WindowClosed),
-        keys,
+        panel,
     ])
 }
 
@@ -349,6 +357,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 Err(err) => eprintln!("zehll: cannot restart: {err}"),
             }
         }
+        Message::Audio(audio) => bar.audio = Some(audio),
+        Message::ToggleMute(target) => return Task::future(audio::toggle_mute(target)).discard(),
         Message::PowerMenu => {
             if let Err(err) = std::process::Command::new("wlogout").spawn() {
                 eprintln!("zehll: cannot start wlogout: {err}");

@@ -20,7 +20,7 @@ Delivery: one commit per phase on the feature branch (ask-on-risk). Test runner:
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
 | T1 | S1-S3 | inline | done | `feat: add side panel with calendar` |
-| T2 | S4 | inline | pending | |
+| T2 | S4 | inline | done | `feat: add audio toggles to the side panel` |
 | T3 | S5 | inline | pending | |
 | T4 | S6 | inline | pending | |
 | T5 | S7 | inline | pending | |
@@ -33,3 +33,4 @@ Delivery: one commit per phase on the feature branch (ask-on-risk). Test runner:
 - L3 Engram mirror pending: Engram does not know the `zehll` project yet.
 - L4 T1 done: panel layer (460 px, Overlay, OnDemand keyboard) plus a transparent full-screen catcher created only while open; SIGUSR1 toggles; Escape closes; hover zone on the bar's right edge opens. Surfaces now live in a registry until `WindowClosed`, so closing surfaces never render as a bar. Calendar grid tests RED (todo!) then GREEN (4 tests pass). Verified with `pkill -USR1 -x zehll`: panel and catcher layers appear and disappear; screenshot matches the mockup. Not verified: hover, Escape and click-outside (need real input).
 - L5 (2026-11-21) User: "no podemos hacer que lo anime hyprland? el atajo lo podemos dejar registrado? no quiero agregar el shortcut todavia para no molestar a qs". S1 updated: the toggle is the Hyprland global shortcut `zehll:panelToggle` (protocol hyprland-global-shortcuts-v1), replacing SIGUSR1; the user's Super+N keeps opening ii for now. Slide-in comes from Hyprland layer rules for `^zehll-panel$` (slide right) and `^zehll-panel-catcher$` (no_anim), added to the user's rules.lua. Verified: `hyprctl globalshortcuts` lists `zehll:panelToggle`; `hyprctl dispatch 'hl.dsp.global("zehll:panelToggle")'` opens and closes the panel; config reload reports no errors.
+- L6 T2 done: `src/audio.rs` reads default sink/source with `wpctl` and listens to `pactl subscribe`, coalescing each event burst (50 ms) into one read and emitting only on change. The subscription runs only while the panel is open (`kill_on_drop` stops pactl on close). Parser tests RED (todo!) then GREEN. Verified: tiles render, an external `wpctl set-mute` on the mic updates the tile live, and Zehll's pactl process exists only while the panel is open. Not verified: clicking a tile (needs real input).

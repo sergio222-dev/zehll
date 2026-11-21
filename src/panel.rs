@@ -3,8 +3,8 @@ use iced::widget::{Column, Row, Space, Stack, button, column, container, row, te
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::{
-    Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, Message, calendar, glow_style, line, panel_style, shape, slanted,
-    system,
+    BODY_BOLD, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, audio, calendar, glow_style, line,
+    panel_style, shape, slanted, system,
 };
 
 pub const WIDTH: u32 = 460;
@@ -14,7 +14,10 @@ const WEEKDAYS: [&str; 7] = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
 
 pub fn view(bar: &Bar) -> Element<'_, Message> {
     let theme = bar.theme;
-    let content = column![header(bar), Space::new().height(Length::Fill), calendar_view(bar)]
+    let content = column![header(bar)]
+        .push(quick_settings(bar))
+        .push(Space::new().height(Length::Fill))
+        .push(calendar_view(bar))
         .spacing(14)
         .padding(PADDING);
     let content = container(content).width(Length::Fill).height(Length::Fill).style(move |_| {
@@ -56,6 +59,87 @@ fn action_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'
         .on_press(message)
         .padding(0)
         .style(move |_, status| glow_style(theme, status, 10.0))
+        .into()
+}
+
+struct Toggle {
+    icon: &'static str,
+    name: &'static str,
+    state: String,
+    on: bool,
+    message: Message,
+}
+
+fn quick_settings(bar: &Bar) -> Option<Element<'_, Message>> {
+    let theme = bar.theme;
+    let audio = bar.audio.as_ref()?;
+    let output = &audio.output;
+    let toggles = [
+        Toggle {
+            icon: if output.muted { "volume_off" } else { "volume_up" },
+            name: "Audio output",
+            state: if output.muted { String::from("MUTED") } else { format!("UNMUTED · {:.0}%", output.volume * 100.0) },
+            on: !output.muted,
+            message: Message::ToggleMute(audio::OUTPUT),
+        },
+        Toggle {
+            icon: if audio.input.muted { "mic_off" } else { "mic" },
+            name: "Microphone",
+            state: String::from(if audio.input.muted { "MUTED" } else { "LIVE" }),
+            on: !audio.input.muted,
+            message: Message::ToggleMute(audio::INPUT),
+        },
+    ];
+
+    let on = toggles.iter().filter(|toggle| toggle.on).count();
+    let strip = row![
+        text("QUICK SETTINGS").font(CONDENSED).size(14).color(theme.accent),
+        Space::new().width(Length::Fill),
+        text(format!("{on} / {} ON", toggles.len())).font(CONDENSED_BOLD).size(14).color(theme.text_muted),
+    ]
+    .align_y(Alignment::Center)
+    .padding([0, 14])
+    .height(26);
+    let strip = container(slanted(strip, 10.0, theme.section_background)).padding(Padding::ZERO.right(16.0));
+
+    let mut tiles = toggles.into_iter().map(|toggle| tile(bar, toggle)).collect::<Vec<_>>().into_iter();
+    let mut grid = Column::new().spacing(8);
+    while let Some(first) = tiles.next() {
+        let second = tiles.next().unwrap_or_else(|| Space::new().width(Length::Fill).into());
+        grid = grid.push(row![first, second].spacing(8));
+    }
+    Some(column![strip, grid].spacing(8).into())
+}
+
+fn tile(bar: &Bar, toggle: Toggle) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let (block_color, icon_color, state_color) = match toggle.on {
+        true => (theme.accent, theme.on_accent, theme.accent),
+        false => (theme.section_background, theme.text, theme.text_muted),
+    };
+    let icon = container(text(toggle.icon).font(ICON_FONT).size(20).color(icon_color).shaping(text::Shaping::Advanced))
+        .padding(Padding::ZERO.right(8.0))
+        .center_x(46)
+        .center_y(56);
+    let label = column![
+        text(toggle.name).font(BODY_BOLD).size(14),
+        text(toggle.state).font(CONDENSED_BOLD).size(14).color(state_color),
+    ]
+    .spacing(1);
+    let content = row![slanted(icon, 10.0, block_color), label].spacing(10).align_y(Alignment::Center);
+    button(content)
+        .on_press(toggle.message)
+        .padding(0)
+        .width(Length::Fill)
+        .height(56)
+        .style(move |_, status| {
+            let mut style = glow_style(theme, status, 10.0);
+            if style.background.is_none() {
+                style.background = Some(theme.popup_background.into());
+                style.border = iced::Border { color: theme.border, width: 1.0, radius: 0.0.into() };
+            }
+            style
+        })
         .into()
 }
 
