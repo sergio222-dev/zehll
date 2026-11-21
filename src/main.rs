@@ -4,11 +4,15 @@ mod audio;
 mod bluetooth;
 mod brightness;
 mod calendar;
+mod cava;
 mod dbus;
+mod flame;
 mod flashbang;
 mod hyprland;
 mod idle;
+mod media;
 mod meetings;
+mod mpris;
 mod menu;
 mod mixer;
 mod network;
@@ -169,6 +173,19 @@ struct Bar {
     calendar: Option<OpenPanel>,
     // Day whose agenda the calendar popover shows.
     calendar_day: NaiveDate,
+    // Active MPRIS player; the media button is hidden without one.
+    media: Option<mpris::Player>,
+    // Player popover and its click catcher.
+    media_popover: Option<OpenPanel>,
+    // Cover art URL last requested and its image once loaded.
+    media_art_url: String,
+    media_art: Option<image::Handle>,
+    // Position in seconds while the seek slider is being dragged.
+    media_seek: Option<f32>,
+    // Latest cava frame, drawn behind the player popover.
+    media_spectrum: Vec<f32>,
+    // Flame burst around the media button: when playback last started or stopped, and which.
+    media_flare: Option<(Instant, bool)>,
 }
 
 struct Popup {
@@ -181,6 +198,7 @@ enum Surface {
     TrayMenu(OpenMenu),
     Panel,
     Calendar,
+    Media,
     MeetingAlerts,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
@@ -191,6 +209,7 @@ enum Surface {
 enum Tooltip {
     Clock,
     Meeting,
+    Media,
 }
 
 struct OpenMenu {
@@ -261,6 +280,13 @@ impl Bar {
             ringing: None,
             calendar: None,
             calendar_day: Local::now().date_naive(),
+            media: None,
+            media_popover: None,
+            media_art_url: String::new(),
+            media_art: None,
+            media_seek: None,
+            media_spectrum: Vec::new(),
+            media_flare: None,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -378,6 +404,15 @@ enum Message {
     JoinMeetingAlert(String, NaiveDateTime),
     SignedInMeetings,
     Meetings((NaiveDate, NaiveDate), meetings::Status, Vec<meetings::Meeting>),
+    MediaPlayer(Option<mpris::Player>),
+    MediaArt(String, Option<image::Handle>),
+    ToggleMedia,
+    Media(mpris::Command),
+    DragMediaSeek(f32),
+    MediaSpectrum(Vec<f32>),
+    // Redraws the live wave of the player popover and the flame burst of the media button.
+    MediaFrame,
+    ReleaseMediaSeek,
 }
 
 fn namespace() -> String {
@@ -407,8 +442,24 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         true => Subscription::none(),
         false => time::every(alert::RING_INTERVAL).map(|_| Message::RingMeetingAlert),
     };
-    let calendar_keys = match bar.calendar {
-        Some(_) => keyboard::listen().map(Message::Key),
+    let calendar_keys = match bar.calendar.is_some() || bar.media_popover.is_some() {
+        true => keyboard::listen().map(Message::Key),
+        false => Subscription::none(),
+    };
+    // cava and the live wave run only while the player popover shows a playing player.
+    let playing = bar.media_popover.is_some() && bar.media.as_ref().is_some_and(|player| player.playing);
+    let media = match playing {
+        true => Subscription::batch([
+            Subscription::run(cava::events).map(Message::MediaSpectrum),
+            match bar.media.as_ref().is_some_and(|player| player.length.is_none()) {
+                true => time::every(Duration::from_millis(33)).map(|_| Message::MediaFrame),
+                false => Subscription::none(),
+            },
+        ]),
+        false => Subscription::none(),
+    };
+    let flare = match bar.media_flare {
+        Some(_) => time::every(Duration::from_millis(16)).map(|_| Message::MediaFrame),
         None => Subscription::none(),
     };
     let panel = match bar.panel {
@@ -432,10 +483,13 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
+        Subscription::run(mpris::events).map(Message::MediaPlayer),
         window::close_events().map(Message::WindowClosed),
         panel,
         calendar_keys,
         ring,
+        media,
+        flare,
     ])
 }
 
@@ -480,8 +534,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::ActiveWindow(window) => bar.window = window,
         Message::ShowTooltip(tooltip) => {
-            // The tooltips open under the clock, where the calendar popover is.
-            if bar.tooltip.is_some() || bar.calendar.is_some() {
+            // The tooltips open under the clock, where the calendar and player popovers are.
+            if bar.tooltip.is_some() || bar.calendar.is_some() || bar.media_popover.is_some() {
                 return Task::none();
             }
             // A layer surface instead of an xdg_popup: layershellev grabs the pointer for every
@@ -501,6 +555,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                     (TOOLTIP_WIDTH, TOOLTIP_HEADER_HEIGHT + 2 + TOOLTIP_ROW_HEIGHT + TOOLTIP_STRIP_HEIGHT + list + 2)
                 }
                 Tooltip::Meeting => MEETING_TOOLTIP_SIZE,
+                Tooltip::Media => media::TOOLTIP_SIZE,
             };
             let settings = NewLayerShellSettings {
                 size: Some(size),
@@ -617,6 +672,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.calendar.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
                 return close_calendar(bar);
             }
+            if bar.media_popover.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
+                return close_media(bar);
+            }
         }
         Message::HideTooltip => {
             if let Some(id) = bar.tooltip.take() {
@@ -632,11 +690,11 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 return open_panel(bar);
             }
         }
-        // Sent by the click catcher, which both the panel and the calendar popover use.
-        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar)]),
+        // Sent by the click catcher, which the panel and the popovers use.
+        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar), close_media(bar)]),
         Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
-            if bar.calendar.is_some() {
-                return close_calendar(bar);
+            if bar.calendar.is_some() || bar.media_popover.is_some() {
+                return Task::batch([close_calendar(bar), close_media(bar)]);
             }
             // Escape closes the sub-panel first, then the panel.
             if bar.subpanel.take().is_none() {
@@ -718,6 +776,64 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return fetch_meetings(bar);
         }
         Message::FetchMeetings => return fetch_meetings(bar),
+        Message::MediaPlayer(player) => {
+            let art_url = player.as_ref().map(|player| player.art_url.clone()).unwrap_or_default();
+            // Burst when the shown player starts or stops, not when another player takes over.
+            if let (Some(old), Some(new)) = (&bar.media, &player)
+                && old.service == new.service
+                && old.playing != new.playing
+            {
+                bar.media_flare = Some((Instant::now(), new.playing));
+            }
+            bar.media = player;
+            let mut tasks = Vec::new();
+            if art_url != bar.media_art_url {
+                bar.media_art_url = art_url.clone();
+                bar.media_art = None;
+                if !art_url.is_empty() {
+                    tasks.push(Task::perform(mpris::art(art_url.clone()), move |art| Message::MediaArt(art_url.clone(), art)));
+                }
+            }
+            if bar.media.is_none() {
+                tasks.push(close_media(bar));
+                if matches!(bar.tooltip.and_then(|id| bar.surfaces.get(&id)), Some(Surface::Tooltip(Tooltip::Media))) {
+                    tasks.push(Task::done(Message::HideTooltip));
+                }
+            }
+            return Task::batch(tasks);
+        }
+        // A late download for a track that already changed is dropped.
+        Message::MediaArt(url, art) => {
+            if url == bar.media_art_url {
+                bar.media_art = art;
+            }
+        }
+        Message::ToggleMedia => {
+            return if bar.media_popover.is_some() { close_media(bar) } else { open_media(bar) };
+        }
+        Message::Media(command) => {
+            if let Some(player) = bar.media.clone() {
+                return Task::future(mpris::run(player, command)).discard();
+            }
+        }
+        Message::MediaSpectrum(points) => bar.media_spectrum = points,
+        Message::MediaFrame => {
+            if bar.media_flare.is_some_and(|(started, _)| started.elapsed() >= flame::DURATION) {
+                bar.media_flare = None;
+            }
+        }
+        Message::DragMediaSeek(position) => {
+            if bar.media.as_ref().is_some_and(|player| player.can_seek) {
+                bar.media_seek = Some(position);
+            }
+        }
+        // Seek once on release, like the volume sliders.
+        Message::ReleaseMediaSeek => {
+            if let (Some(position), Some(player)) = (bar.media_seek.take(), bar.media.clone()) {
+                let command = mpris::Command::Seek(Duration::from_secs_f32(position));
+                return Task::future(mpris::run(player, command)).discard();
+            }
+        }
         Message::ToggleCalendar => {
             return if bar.calendar.is_some() { close_calendar(bar) } else { open_calendar(bar) };
         }
@@ -1158,7 +1274,48 @@ fn open_calendar(bar: &mut Bar) -> Task<Message> {
     })
     .chain(Task::done(Message::NewLayerShell { settings: popover, id: open.panel }));
     bar.calendar = Some(open);
-    Task::batch([close_panel(bar), Task::done(Message::HideTooltip), task, fetch])
+    Task::batch([close_panel(bar), close_media(bar), Task::done(Message::HideTooltip), task, fetch])
+}
+
+/// Opens the player popover under the media button, closing the panel, the calendar and the tooltip.
+fn open_media(bar: &mut Bar) -> Task<Message> {
+    let Some(output) = hyprland::focused_monitor() else {
+        return Task::none();
+    };
+    let popover = NewLayerShellSettings {
+        size: Some((media::WIDTH, media::HEIGHT)),
+        layer: Layer::Overlay,
+        // Anchored only to the top, so it is centered under the media button and the clock.
+        anchor: Anchor::Top,
+        exclusive_zone: Some(0),
+        margin: Some((14, 0, 0, 0)),
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::OutputName(output.clone()),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-media")),
+    };
+    let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
+    bar.surfaces.insert(open.catcher, Surface::Catcher);
+    bar.surfaces.insert(open.panel, Surface::Media);
+    let task = Task::done(Message::NewLayerShell {
+        settings: catcher_settings(output, "zehll-media-catcher"),
+        id: open.catcher,
+    })
+    .chain(Task::done(Message::NewLayerShell { settings: popover, id: open.panel }));
+    bar.media_popover = Some(open);
+    Task::batch([close_panel(bar), close_calendar(bar), Task::done(Message::HideTooltip), task])
+}
+
+fn close_media(bar: &mut Bar) -> Task<Message> {
+    bar.media_seek = None;
+    bar.media_spectrum.clear();
+    let Some(open) = bar.media_popover.take() else {
+        return Task::none();
+    };
+    Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
 }
 
 fn close_calendar(bar: &mut Bar) -> Task<Message> {
@@ -1202,6 +1359,8 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::TrayMenu(open)) => return tray_menu_view(bar, open),
         Some(Surface::Panel) => return panel::view(bar),
         Some(Surface::Calendar) => return agenda::view(bar),
+        Some(Surface::Media) => return media::view(bar),
+        Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
         Some(Surface::Catcher) => {
@@ -1249,7 +1408,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     let content = container(
         row![
             container(window).width(Length::FillPortion(1)).clip(true),
-            container(row![clock].push(meeting_pill(bar)).spacing(6).align_y(Alignment::Center))
+            container(Row::new().push(media::bar_button(bar)).push(clock).push(meeting_pill(bar)).spacing(6).align_y(Alignment::Center))
                 .center_x(Length::FillPortion(1)),
             container(tray_view(bar, id)).align_right(Length::FillPortion(1)),
             // Hovering the right edge opens the side panel, like ii.
