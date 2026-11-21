@@ -110,7 +110,7 @@ fn quick_settings(bar: &Bar) -> Element<'_, Message> {
             state: network.label(),
             on: network.connected,
             message: Message::SetWifi(!network.wifi_enabled),
-            subpanel: None,
+            subpanel: Some(Subpanel::Wifi),
         });
     }
     if let Some(bluetooth) = &bar.bluetooth {

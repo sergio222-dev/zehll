@@ -1,9 +1,9 @@
 use std::fmt;
 
-use iced::widget::{Column, Row, Space, Stack, button, column, container, mouse_area, pick_list, row, scrollable, text};
+use iced::widget::{Column, Row, Space, Stack, button, column, container, mouse_area, pick_list, row, scrollable, text, text_input};
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
-use crate::{BODY_BOLD, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, bluetooth, glow_style, line, mixer, shape, slanted, tray};
+use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, bluetooth, glow_style, line, mixer, network, shape, slanted, tray};
 
 const WIDTH: f32 = 420.0;
 const HEIGHT: f32 = 620.0;
@@ -14,6 +14,7 @@ const VOLUME_CELLS: u32 = 20;
 pub enum Subpanel {
     Audio,
     Bluetooth,
+    Wifi,
 }
 
 impl Subpanel {
@@ -22,6 +23,7 @@ impl Subpanel {
         match self {
             Subpanel::Audio => &["pavucontrol"],
             Subpanel::Bluetooth => &["kcmshell6", "kcm_bluetooth"],
+            Subpanel::Wifi => &["kcmshell6", "kcm_networkmanagement"],
         }
     }
 }
@@ -30,6 +32,7 @@ pub fn view(bar: &Bar, subpanel: Subpanel) -> Element<'_, Message> {
     match subpanel {
         Subpanel::Audio => audio(bar),
         Subpanel::Bluetooth => bluetooth_devices(bar),
+        Subpanel::Wifi => wifi(bar),
     }
 }
 
@@ -287,4 +290,85 @@ fn accent_button<'a>(bar: &'a Bar, label: &'a str, message: Message) -> Element<
         .padding(Padding { top: 0.0, right: 24.0, bottom: 0.0, left: 14.0 })
         .center_y(32);
     button(slanted(label, 10.0, theme.accent)).on_press(message).padding(0).style(|_, _| button::Style::default()).into()
+}
+
+fn wifi(bar: &Bar) -> Element<'_, Message> {
+    let Some(wifi) = &bar.wifi else {
+        return frame(bar, "CONNECT TO WI-FI", String::new(), empty("NO WI-FI DEVICE", bar), Subpanel::Wifi);
+    };
+    let body = if wifi.networks.is_empty() {
+        empty("SCANNING", bar)
+    } else {
+        let rows = Column::with_children(wifi.networks.iter().map(|network| wifi_row(bar, network))).spacing(4);
+        scrollable(rows).height(Length::Fill).into()
+    };
+    frame(bar, "CONNECT TO WI-FI", format!("{} FOUND", wifi.networks.len()), body, Subpanel::Wifi)
+}
+
+fn wifi_row<'a>(bar: &'a Bar, network: &'a network::AccessPoint) -> Element<'a, Message> {
+    let theme = bar.theme;
+    let bars = Row::with_children((1..=4u8).map(|bar_index| {
+        let color = if bar_index <= network.bars() { theme.text } else { theme.section_background };
+        container(Space::new()).width(4).height(f32::from(bar_index) * 4.0).style(move |_| container::background(color)).into()
+    }))
+    .spacing(2)
+    .height(16)
+    .align_y(Alignment::End);
+
+    let mut name = column![text(&network.ssid).font(BODY_BOLD).size(14).wrapping(text::Wrapping::None)].spacing(1).width(Length::Fill);
+    if network.active {
+        name = name.push(text("CONNECTED").font(CONDENSED_BOLD).size(13).color(theme.accent));
+    }
+    let band = container(text(network.band()).font(CONDENSED_BOLD).size(12).color(theme.text_muted)).padding([1, 6]).style(move |_| container::Style {
+        border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+    let mut content = row![bars, name, band].spacing(12).align_y(Alignment::Center);
+    if network.secure {
+        content = content.push(text("lock").font(ICON_FONT).size(16).color(theme.text_muted).shaping(text::Shaping::Advanced));
+    }
+
+    let active = network.active;
+    let row = button(container(content).padding([0, 12]).center_y(50))
+        .on_press_maybe((!active).then(|| Message::SelectWifi(network.ssid.clone())))
+        .padding(0)
+        .width(Length::Fill)
+        .style(move |_, status| {
+            if active {
+                return button::Style {
+                    background: Some(Color { a: 0.08, ..theme.glow }.into()),
+                    text_color: theme.text,
+                    border: Border { color: theme.glow, width: 1.0, radius: 0.0.into() },
+                    shadow: iced::Shadow { color: Color { a: 0.3, ..theme.glow }, blur_radius: 10.0, ..Default::default() },
+                    ..Default::default()
+                };
+            }
+            glow_style(theme, status, 8.0)
+        });
+
+    if bar.wifi_prompt.as_deref() != Some(network.ssid.as_str()) {
+        return row.into();
+    }
+    // A secured network without a saved profile asks for its password inline.
+    let password = text_input("Password", &bar.wifi_password)
+        .on_input(Message::WifiPassword)
+        .on_submit(Message::SubmitWifiPassword)
+        .secure(true)
+        .font(BODY_FONT)
+        .size(14)
+        .padding([7, 10])
+        .style(move |_, status| text_input::Style {
+            background: theme.section_background.into(),
+            border: Border {
+                color: if matches!(status, text_input::Status::Focused { .. }) { theme.glow } else { theme.border },
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            icon: theme.text_muted,
+            placeholder: theme.text_dim,
+            value: theme.text,
+            selection: Color { a: 0.3, ..theme.glow },
+        });
+    let prompt = row![password, accent_button(bar, "CONNECT", Message::SubmitWifiPassword)].spacing(8).align_y(Alignment::Center);
+    column![row, container(prompt).padding(Padding { top: 6.0, right: 0.0, bottom: 8.0, left: 34.0 })].into()
 }

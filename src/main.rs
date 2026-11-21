@@ -128,6 +128,10 @@ struct Bar {
     mixer: Option<mixer::Mixer>,
     // Icons of audio streams by executable name, looked up once.
     app_icons: HashMap<String, Option<tray::Icon>>,
+    wifi: Option<network::Wifi>,
+    // SSID asking for a password in the Wi-Fi sub-panel.
+    wifi_prompt: Option<String>,
+    wifi_password: String,
 }
 
 struct Popup {
@@ -191,6 +195,9 @@ impl Bar {
             subpanel: None,
             mixer: None,
             app_icons: HashMap::new(),
+            wifi: None,
+            wifi_prompt: None,
+            wifi_password: String::new(),
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -269,6 +276,10 @@ enum Message {
     SetStreamVolume(u32, u32),
     SetDefaultSink(String),
     BluetoothDevice(bluetooth::DeviceAction),
+    Wifi(network::Wifi),
+    SelectWifi(String),
+    WifiPassword(String),
+    SubmitWifiPassword,
 }
 
 fn namespace() -> String {
@@ -279,6 +290,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
     // Keys (Escape) and the panel's data sources only run while the panel is open.
     let mixer = match bar.subpanel {
         Some(subpanel::Subpanel::Audio) => Subscription::run(mixer::events).map(Message::Mixer),
+        Some(subpanel::Subpanel::Wifi) => Subscription::run(network::wifi_events).map(Message::Wifi),
         _ => Subscription::none(),
     };
     let panel = match bar.panel {
@@ -479,7 +491,10 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 return close_panel(bar);
             }
         }
-        Message::OpenSubpanel(subpanel) => bar.subpanel = Some(subpanel),
+        Message::OpenSubpanel(subpanel) => {
+            bar.subpanel = Some(subpanel);
+            bar.wifi_prompt = None;
+        }
         Message::CloseSubpanel => bar.subpanel = None,
         Message::SubpanelDetails(subpanel) => {
             let [program, args @ ..] = subpanel.details() else {
@@ -499,6 +514,33 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::SetStreamVolume(index, percent) => return Task::future(mixer::set_volume(index, percent)).discard(),
         Message::SetDefaultSink(name) => return Task::future(mixer::set_default_sink(name)).discard(),
         Message::BluetoothDevice(action) => return Task::future(bluetooth::run(action)).discard(),
+        Message::Wifi(wifi) => bar.wifi = Some(wifi),
+        Message::SelectWifi(ssid) => {
+            let Some(wifi) = &bar.wifi else {
+                return Task::none();
+            };
+            let Some(network) = wifi.networks.iter().find(|network| network.ssid == ssid) else {
+                return Task::none();
+            };
+            if network.secure && !network.known {
+                bar.wifi_prompt = Some(ssid);
+                bar.wifi_password.clear();
+                return Task::none();
+            }
+            bar.wifi_prompt = None;
+            return Task::future(network::connect(wifi.device.clone(), network.path.clone(), ssid, None)).discard();
+        }
+        Message::WifiPassword(password) => bar.wifi_password = password,
+        Message::SubmitWifiPassword => {
+            let (Some(wifi), Some(ssid)) = (&bar.wifi, bar.wifi_prompt.take()) else {
+                return Task::none();
+            };
+            let Some(network) = wifi.networks.iter().find(|network| network.ssid == ssid) else {
+                return Task::none();
+            };
+            let password = std::mem::take(&mut bar.wifi_password);
+            return Task::future(network::connect(wifi.device.clone(), network.path.clone(), ssid, Some(password))).discard();
+        }
         Message::CalendarMonth(delta) => bar.calendar_month = panel::shift_month(bar.calendar_month, delta),
         Message::ReloadShell => {
             // Start a fresh instance and leave; it takes over the D-Bus names once this one exits.
