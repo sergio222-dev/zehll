@@ -245,7 +245,7 @@ fn notifications_view(bar: &Bar) -> Element<'_, Message> {
         .into()
 }
 
-fn notification_card<'a>(bar: &'a Bar, notification: &'a notifications::Notification) -> Element<'a, Message> {
+pub fn notification_card<'a>(bar: &'a Bar, notification: &'a notifications::Notification) -> Element<'a, Message> {
     let theme = bar.theme;
     let header = row![
         text(notification.app_name.to_uppercase()).font(CONDENSED_BOLD).size(13).color(theme.accent),

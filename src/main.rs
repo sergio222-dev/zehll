@@ -9,6 +9,7 @@ mod network;
 mod nightlight;
 mod notifications;
 mod panel;
+mod popup;
 mod shape;
 mod shortcuts;
 mod state;
@@ -112,12 +113,21 @@ struct Bar {
     // Newest first.
     notifications: Vec<notifications::Notification>,
     do_not_disturb: bool,
+    // Newest first.
+    popups: Vec<Popup>,
+    popup_surface: Option<Id>,
+}
+
+struct Popup {
+    id: u32,
+    expires: Option<Instant>,
 }
 
 enum Surface {
     Tooltip,
     TrayMenu(OpenMenu),
     Panel,
+    Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
     Catcher,
 }
@@ -160,6 +170,8 @@ impl Bar {
             notifications_handle: None,
             notifications: Vec::new(),
             do_not_disturb: state.do_not_disturb,
+            popups: Vec::new(),
+            popup_surface: None,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -221,6 +233,7 @@ enum Message {
     DismissNotification(u32),
     ClearNotifications,
     ToggleDoNotDisturb,
+    HidePopup(u32),
 }
 
 fn namespace() -> String {
@@ -260,6 +273,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             if bar.tooltip.is_some() || bar.panel.is_some() {
                 bar.uptime = system::uptime().unwrap_or_default();
+            }
+            let now = Instant::now();
+            let before = bar.popups.len();
+            bar.popups.retain(|popup| popup.expires.is_none_or(|expires| expires > now));
+            if bar.popups.len() != before {
+                return sync_popups(bar);
             }
             // Like ii, apply the schedule at startup and when it changes; manual toggles hold until then.
             let scheduled = nightlight::scheduled(bar.now.time());
@@ -389,6 +408,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.tray_menu == Some(id) {
                 bar.tray_menu = None;
             }
+            if bar.popup_surface == Some(id) {
+                bar.popup_surface = None;
+            }
             if bar.panel.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
                 return close_panel(bar);
             }
@@ -439,23 +461,37 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::Notifications(notifications::Event::Ready(handle)) => bar.notifications_handle = Some(handle),
         Message::Notifications(notifications::Event::Notify(notification)) => {
-            match bar.notifications.iter_mut().find(|existing| existing.id == notification.id) {
+            let (id, timeout) = (notification.id, notification.timeout);
+            match bar.notifications.iter_mut().find(|existing| existing.id == id) {
                 Some(existing) => *existing = notification,
                 None => bar.notifications.insert(0, notification),
             }
+            if !bar.do_not_disturb {
+                bar.popups.retain(|popup| popup.id != id);
+                bar.popups.insert(0, Popup { id, expires: timeout.map(|timeout| Instant::now() + timeout) });
+                bar.popups.truncate(popup::MAX_VISIBLE);
+                return sync_popups(bar);
+            }
         }
-        Message::Notifications(notifications::Event::Close(id)) => bar.notifications.retain(|notification| notification.id != id),
+        Message::Notifications(notifications::Event::Close(id)) => {
+            bar.notifications.retain(|notification| notification.id != id);
+            return hide_popups(bar, |popup| popup.id == id);
+        }
         Message::DismissNotification(id) => {
             bar.notifications.retain(|notification| notification.id != id);
-            return notifications_closed(bar, vec![id]);
+            return notifications_closed(bar, vec![id]).chain(hide_popups(bar, |popup| popup.id == id));
         }
         Message::ClearNotifications => {
             let ids = bar.notifications.drain(..).map(|notification| notification.id).collect();
-            return notifications_closed(bar, ids);
+            return notifications_closed(bar, ids).chain(hide_popups(bar, |_| true));
         }
+        Message::HidePopup(id) => return hide_popups(bar, |popup| popup.id == id),
         Message::ToggleDoNotDisturb => {
             bar.do_not_disturb = !bar.do_not_disturb;
             bar.save_state();
+            if bar.do_not_disturb {
+                return hide_popups(bar, |_| true);
+            }
         }
         Message::SetBluetooth(adapter, powered) => {
             return Task::future(bluetooth::set_powered(adapter, powered)).discard();
@@ -469,6 +505,49 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         _ => {}
     }
     Task::none()
+}
+
+fn hide_popups(bar: &mut Bar, hide: impl Fn(&Popup) -> bool) -> Task<Message> {
+    let before = bar.popups.len();
+    bar.popups.retain(|popup| !hide(popup));
+    if bar.popups.len() == before {
+        return Task::none();
+    }
+    sync_popups(bar)
+}
+
+/// Creates, resizes or removes the popup surface to match the visible popups.
+fn sync_popups(bar: &mut Bar) -> Task<Message> {
+    let visible = bar.popups.iter().filter_map(|popup| bar.notifications.iter().find(|notification| notification.id == popup.id));
+    let height = popup::height(visible);
+    match (bar.popup_surface, height) {
+        (Some(id), 0) => {
+            bar.popup_surface = None;
+            Task::done(Message::RemoveWindow(id))
+        }
+        (Some(id), height) => Task::done(Message::SizeChange { id, size: (popup::WIDTH, height) }),
+        (None, 0) => Task::none(),
+        (None, height) => {
+            let Some(output) = hyprland::focused_monitor() else {
+                return Task::none();
+            };
+            let settings = NewLayerShellSettings {
+                size: Some((popup::WIDTH, height)),
+                layer: Layer::Overlay,
+                anchor: Anchor::Top | Anchor::Right,
+                exclusive_zone: Some(0),
+                margin: Some((8, 12, 0, 0)),
+                keyboard_interactivity: KeyboardInteractivity::None,
+                output_option: OutputOption::OutputName(output),
+                events_transparent: false,
+                namespace: Some(String::from("zehll-popups")),
+            };
+            let id = Id::unique();
+            bar.popup_surface = Some(id);
+            bar.surfaces.insert(id, Surface::Popups);
+            Task::done(Message::NewLayerShell { settings, id })
+        }
+    }
 }
 
 fn notifications_closed(bar: &Bar, ids: Vec<u32>) -> Task<Message> {
@@ -554,6 +633,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Tooltip) => return clock_tooltip(bar),
         Some(Surface::TrayMenu(open)) => return tray_menu_view(bar, open),
         Some(Surface::Panel) => return panel::view(bar),
+        Some(Surface::Popups) => return popup::view(bar),
         Some(Surface::Catcher) => {
             return mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::ClosePanel)

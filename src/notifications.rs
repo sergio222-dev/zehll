@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use chrono::{DateTime, Local};
 use enumflags2::BitFlags;
@@ -16,6 +17,8 @@ const PATH: &str = "/org/freedesktop/Notifications";
 /// `NotificationClosed` reasons from the specification.
 pub const DISMISSED: u32 = 2;
 const CLOSED_BY_CALL: u32 = 3;
+// How long a popup stays when the client leaves it to the server (`expire_timeout` of -1).
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -25,6 +28,19 @@ pub struct Notification {
     pub body: String,
     pub critical: bool,
     pub time: DateTime<Local>,
+    /// How long the popup stays on screen; `None` keeps it until dismissed.
+    pub timeout: Option<Duration>,
+}
+
+/// Popup lifetime from the client's `expire_timeout` in milliseconds: -1 leaves it to the
+/// server, 0 never expires. Critical notifications never expire, as the specification suggests.
+fn popup_timeout(expire_timeout: i32, critical: bool) -> Option<Duration> {
+    match expire_timeout {
+        _ if critical => None,
+        -1 => Some(DEFAULT_TIMEOUT),
+        0 => None,
+        milliseconds => Some(Duration::from_millis(milliseconds.unsigned_abs().into())),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +117,7 @@ impl Server {
         body: String,
         _actions: Vec<String>,
         hints: HashMap<String, OwnedValue>,
-        _expire_timeout: i32,
+        expire_timeout: i32,
     ) -> u32 {
         let id = match replaces_id {
             0 => {
@@ -112,7 +128,15 @@ impl Server {
             id => id,
         };
         let critical = hints.get("urgency").and_then(|urgency| u8::try_from(urgency).ok()) == Some(2);
-        let notification = Notification { id, app_name, summary, body: strip_markup(&body), critical, time: Local::now() };
+        let notification = Notification {
+            id,
+            app_name,
+            summary,
+            body: strip_markup(&body),
+            critical,
+            time: Local::now(),
+            timeout: popup_timeout(expire_timeout, critical),
+        };
         let _ = self.events.unbounded_send(Event::Notify(notification));
         id
     }
@@ -153,6 +177,14 @@ fn strip_markup(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn popup_timeouts() {
+        assert_eq!(popup_timeout(-1, false), Some(DEFAULT_TIMEOUT));
+        assert_eq!(popup_timeout(0, false), None);
+        assert_eq!(popup_timeout(3000, false), Some(Duration::from_secs(3)));
+        assert_eq!(popup_timeout(3000, true), None);
+    }
 
     #[test]
     fn strips_markup_and_entities() {
