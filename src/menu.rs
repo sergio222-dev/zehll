@@ -11,6 +11,9 @@ const CHAR_WIDTH: f32 = 7.0;
 const MIN_WIDTH: u32 = 120;
 pub const ROW_HEIGHT: u32 = 30;
 pub const SEPARATOR_HEIGHT: u32 = 9;
+// Slanted title strip with the application name, plus the space below it.
+pub const HEADER_HEIGHT: u32 = 26;
+pub const HEADER_GAP: u16 = 6;
 
 /// Applies property updates sent by the application to the cached menu tree.
 pub fn apply_diffs(menu: &mut TrayMenu, diffs: &[MenuDiff]) {
@@ -63,8 +66,8 @@ pub fn has_leading_column(entries: &[&MenuItem], in_submenu: bool) -> bool {
     in_submenu || entries.iter().any(|item| item.toggle_type != ToggleType::CannotBeToggled)
 }
 
-/// Popup size for the given entries, plus a "back" row when inside a submenu.
-pub fn size(entries: &[&MenuItem], in_submenu: bool) -> (u32, u32) {
+/// Popup size for the given entries, plus a "back" row when inside a submenu and the title strip.
+pub fn size(entries: &[&MenuItem], in_submenu: bool, has_header: bool) -> (u32, u32) {
     let label_chars = entries
         .iter()
         .filter_map(|item| item.label.as_deref())
@@ -84,5 +87,6 @@ pub fn size(entries: &[&MenuItem], in_submenu: bool) -> (u32, u32) {
         })
         .sum();
     let back = if in_submenu { ROW_HEIGHT + SEPARATOR_HEIGHT } else { 0 };
-    (width.max(MIN_WIDTH), rows.max(ROW_HEIGHT) + back + 2 * PADDING as u32)
+    let top = if has_header { HEADER_HEIGHT + HEADER_GAP as u32 } else { PADDING as u32 };
+    (width.max(MIN_WIDTH), top + rows.max(ROW_HEIGHT) + back + PADDING as u32)
 }

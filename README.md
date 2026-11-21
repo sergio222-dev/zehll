@@ -9,7 +9,6 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - Active window class and title, updated live from the Hyprland event socket.
 - Clock with a hover tooltip: full date, system uptime and pending tasks from the `ii` todo list.
 - System tray (StatusNotifierItem): icons, left/middle click activation and right-click context menus (DBusMenu) with submenus and toggles.
-- Rounded corners below the bar, so the desktop looks like a rounded screen.
 - One bar per monitor.
 - Material 3 theme loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -30,15 +29,15 @@ Debug builds start noticeably slower because the GPU renderer is unoptimized.
 
 ## Theme
 
-Zehll reads a Material 3 palette in matugen's `colors.json` format from `~/.config/zehll/theme.json` (or `$XDG_CONFIG_HOME/zehll/theme.json`). Missing keys fall back to built-in defaults.
+The bar uses a tactical HUD style: a fixed navy base with slanted panels and glowing highlights. Its accent colors come from a Material 3 palette in matugen's `colors.json` format, read from `~/.config/zehll/theme.json` (or `$XDG_CONFIG_HOME/zehll/theme.json`). Missing keys fall back to orange and cyan.
 
 | Role | Material 3 token |
 |---|---|
-| Bar background | `background` |
-| Popup background | `surface_container_low` |
-| Text | `on_surface` |
-| Muted text | `on_surface_variant` |
-| Borders | `outline_variant` |
+| Accent (window tag, clock underline, highlights) | `primary` |
+| Text on the accent | `on_primary` |
+| Hover glow | `tertiary` |
+
+The Barlow and Barlow Condensed fonts are embedded in the binary (SIL Open Font License, see `assets/fonts/OFL.txt`).
 
 To regenerate it with the wallpaper, add a template to `~/.config/matugen/config.toml` that reuses a `colors.json` template:
 

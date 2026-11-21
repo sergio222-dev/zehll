@@ -21,8 +21,14 @@ pub fn format_uptime(uptime: Duration) -> String {
     }
 }
 
-/// Lines describing the unfinished tasks of the quickshell `ii` todo list.
-pub fn pending_todos() -> Vec<String> {
+#[derive(Debug, Default)]
+pub struct Todos {
+    pub pending: usize,
+    pub lines: Vec<String>,
+}
+
+/// Unfinished tasks of the quickshell `ii` todo list.
+pub fn pending_todos() -> Todos {
     let todos: Vec<serde_json::Value> = std::fs::read_to_string(todo_path())
         .ok()
         .and_then(|content| serde_json::from_str(&content).ok())
@@ -34,7 +40,7 @@ pub fn pending_todos() -> Vec<String> {
         .collect();
 
     if pending.is_empty() {
-        return vec![String::from("No pending tasks")];
+        return Todos { pending: 0, lines: vec![String::from("No pending tasks")] };
     }
     let mut lines: Vec<String> = pending
         .iter()
@@ -45,7 +51,7 @@ pub fn pending_todos() -> Vec<String> {
     if pending.len() > MAX_TODOS {
         lines.push(format!("... and {} more", pending.len() - MAX_TODOS));
     }
-    lines
+    Todos { pending: pending.len(), lines }
 }
 
 fn todo_path() -> PathBuf {

@@ -89,13 +89,3 @@ pub fn cursor_x_on_focused_monitor() -> Option<i32> {
     let monitor = focused_monitor_json()?["x"].as_i64()?;
     Some((cursor - monitor) as i32)
 }
-
-/// Names of all connected monitors.
-pub fn monitors() -> Vec<String> {
-    request("j/monitors")
-        .and_then(|json| json.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|monitor| monitor["name"].as_str().map(str::to_owned))
-        .collect()
-}
