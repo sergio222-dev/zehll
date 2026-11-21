@@ -6,6 +6,7 @@ mod dbus;
 mod flashbang;
 mod hyprland;
 mod idle;
+mod meetings;
 mod menu;
 mod mixer;
 mod network;

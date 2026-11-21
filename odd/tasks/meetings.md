@@ -14,7 +14,7 @@ Delivery: one commit per task. Test runner: `cargo test`.
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
 | T1 | S2 | inline | done | `feat: vendor gcal.py with a date range and end times` |
-| T2 | S1 | inline | pending | |
+| T2 | S1 | inline | done | `feat: add the meetings model and pure helpers` |
 | T8 | S3 | inline | pending | |
 | T3 | S1, S2 | inline | pending | |
 | T4 | S1 | inline | pending | |
@@ -33,3 +33,4 @@ T1 `gcal.py` range + `end`; T2 `meetings.rs` model and pure helpers; T8 `due_ale
 - L1 (2026-11-21) "se quiere implementar la vista de calendarios de el artifact de zhell, usando como base @~/code/calendarz, la idea es implementarlo sin usar quickshell, hacer un plan de implementacion"; then "incluyamos la fase 2 de alertas", "diseña la tarjeta", "aprobado, vamos con T1".
 - L2 Plan: reuse `gcal.py` as a subprocess instead of OAuth in Rust (no HTTP dependency in Zehll; costs a `python3` runtime dependency). Alert card is its own layer surface, not a critical notification, since notification actions go back to the D-Bus sender.
 - L3 T1 done: `scripts/gcal.py` copied from calendarz; `events FROM TO` replaces the fixed 24 h horizon, adds `end`, raises `maxResults` to 250 per calendar; `events` without a range prints the usage (exit 1). No Python test runner in the repo: checked with `py_compile` and a real fetch of the November 2026 grid (2026-10-26 to 2026-12-07): exit 0, 68 events, every one with `end`.
+- L4 T2 done: `src/meetings.rs` with `Meeting` (times converted to local `NaiveDateTime` at parse time so helpers stay pure), `Status` from the `gcal.py` exit code, pill (`SIGN IN` on reauth, nothing on error), urgency thresholds, countdown, tooltip, day grouping, agenda states and Meet-link detection. RED 10/10, GREEN `cargo test` 40/40; 17 `dead_code` warnings until T3/T4 wire the module. Assumptions: the pill only looks 24 h ahead (calendarz's old horizon); a meeting in progress reads `NOW` in the agenda; countdowns of a day or more read `IN 2D 3H`; minutes round up. Built with `CARGO_TARGET_DIR` on tmpfs because `/home` was full.
