@@ -1,13 +1,12 @@
 use std::fmt;
 
-use iced::widget::{Column, Row, Space, Stack, button, column, container, mouse_area, pick_list, row, scrollable, text, text_input};
+use iced::widget::{Column, Row, Space, Stack, button, column, container, mouse_area, pick_list, row, scrollable, slider, text, text_input};
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, bluetooth, glow_style, line, mixer, network, shape, slanted, tray};
 
 const WIDTH: f32 = 420.0;
 const HEIGHT: f32 = 620.0;
-const VOLUME_CELLS: u32 = 20;
 
 /// Floating dialogs opened by right-clicking a quick settings tile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,25 +139,40 @@ fn stream_row<'a>(bar: &'a Bar, stream: &'a mixer::Stream) -> Element<'a, Messag
                 .into()
         }
     };
+    // While dragging, show the dragged value; pactl only runs when the handle is released.
+    let index = stream.index;
+    let volume = match bar.volume_drag {
+        Some((dragged, volume)) if dragged == index => volume,
+        _ => stream.volume,
+    };
     let label = row![
         text(&stream.app).font(BODY_BOLD).size(14),
         text(&stream.title).size(13).color(theme.text_muted).wrapping(text::Wrapping::None).width(Length::Fill),
-        text(format!("{}%", stream.volume)).font(CONDENSED_BOLD).size(15).color(theme.accent),
+        text(format!("{volume}%")).font(CONDENSED_BOLD).size(15).color(theme.accent),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
 
-    // A segmented bar like the HUD's HP gauges: each cell is 5%.
-    let (index, volume) = (stream.index, stream.volume);
-    let filled = volume.div_ceil(100 / VOLUME_CELLS);
-    let cells = Row::with_children((1..=VOLUME_CELLS).map(|cell| {
-        let color = if cell <= filled { theme.accent } else { theme.section_background };
-        mouse_area(container(Space::new()).width(Length::Fill).height(8).style(move |_| container::background(color)))
-            .on_press(Message::SetStreamVolume(index, cell * 100 / VOLUME_CELLS))
-            .into()
-    }))
-    .spacing(2);
-    let cells = mouse_area(cells).on_scroll(move |delta| {
+    let volume_slider = slider(0..=100, volume.min(100), move |volume| Message::DragStreamVolume(index, volume))
+        .on_release(Message::ReleaseStreamVolume)
+        .height(18)
+        .style(move |_, status| slider::Style {
+            rail: slider::Rail {
+                backgrounds: (theme.accent.into(), theme.section_background.into()),
+                width: 6.0,
+                border: Border::default(),
+            },
+            handle: slider::Handle {
+                shape: slider::HandleShape::Rectangle { width: 4, border_radius: 0.0.into() },
+                background: match status {
+                    slider::Status::Active => theme.accent.into(),
+                    slider::Status::Hovered | slider::Status::Dragged => theme.glow.into(),
+                },
+                border_width: 0.0,
+                border_color: Color::TRANSPARENT,
+            },
+        });
+    let volume_slider = mouse_area(volume_slider).on_scroll(move |delta| {
         let up = match delta {
             mouse::ScrollDelta::Lines { y, .. } | mouse::ScrollDelta::Pixels { y, .. } => y > 0.0,
         };
@@ -166,7 +180,7 @@ fn stream_row<'a>(bar: &'a Bar, stream: &'a mixer::Stream) -> Element<'a, Messag
         Message::SetStreamVolume(index, volume)
     });
 
-    row![icon, column![label, cells].spacing(6).width(Length::Fill)].spacing(12).align_y(Alignment::Center).into()
+    row![icon, column![label, volume_slider].spacing(6).width(Length::Fill)].spacing(12).align_y(Alignment::Center).into()
 }
 
 fn bluetooth_devices(bar: &Bar) -> Element<'_, Message> {

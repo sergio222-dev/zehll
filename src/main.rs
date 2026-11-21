@@ -128,6 +128,8 @@ struct Bar {
     mixer: Option<mixer::Mixer>,
     // Icons of audio streams by executable name, looked up once.
     app_icons: HashMap<String, Option<tray::Icon>>,
+    // Stream index and volume while a volume slider is being dragged.
+    volume_drag: Option<(u32, u32)>,
     wifi: Option<network::Wifi>,
     // SSID asking for a password in the Wi-Fi sub-panel.
     wifi_prompt: Option<String>,
@@ -195,6 +197,7 @@ impl Bar {
             subpanel: None,
             mixer: None,
             app_icons: HashMap::new(),
+            volume_drag: None,
             wifi: None,
             wifi_prompt: None,
             wifi_password: String::new(),
@@ -274,6 +277,8 @@ enum Message {
     SubpanelDetails(subpanel::Subpanel),
     Mixer(mixer::Mixer),
     SetStreamVolume(u32, u32),
+    DragStreamVolume(u32, u32),
+    ReleaseStreamVolume,
     SetDefaultSink(String),
     BluetoothDevice(bluetooth::DeviceAction),
     Wifi(network::Wifi),
@@ -512,6 +517,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             bar.mixer = Some(mixer);
         }
         Message::SetStreamVolume(index, percent) => return Task::future(mixer::set_volume(index, percent)).discard(),
+        Message::DragStreamVolume(index, percent) => bar.volume_drag = Some((index, percent)),
+        Message::ReleaseStreamVolume => {
+            if let Some((index, percent)) = bar.volume_drag.take() {
+                return Task::future(mixer::set_volume(index, percent)).discard();
+            }
+        }
         Message::SetDefaultSink(name) => return Task::future(mixer::set_default_sink(name)).discard(),
         Message::BluetoothDevice(action) => return Task::future(bluetooth::run(action)).discard(),
         Message::Wifi(wifi) => bar.wifi = Some(wifi),
