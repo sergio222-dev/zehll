@@ -234,6 +234,7 @@ enum Message {
     ClearNotifications,
     ToggleDoNotDisturb,
     HidePopup(u32),
+    InvokeAction(u32, String),
 }
 
 fn namespace() -> String {
@@ -486,6 +487,15 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return notifications_closed(bar, ids).chain(hide_popups(bar, |_| true));
         }
         Message::HidePopup(id) => return hide_popups(bar, |popup| popup.id == id),
+        Message::InvokeAction(id, key) => {
+            // The specification lets the server close a notification once an action ran.
+            let invoke = match bar.notifications_handle.clone() {
+                Some(handle) => Task::future(handle.invoke(id, key)).discard(),
+                None => Task::none(),
+            };
+            bar.notifications.retain(|notification| notification.id != id);
+            return invoke.chain(notifications_closed(bar, vec![id])).chain(hide_popups(bar, |popup| popup.id == id));
+        }
         Message::ToggleDoNotDisturb => {
             bar.do_not_disturb = !bar.do_not_disturb;
             bar.save_state();

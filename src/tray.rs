@@ -48,13 +48,18 @@ impl TrayItem {
     pub fn set_icon(&mut self, name: Option<&str>, pixmaps: Option<&[IconPixmap]>) {
         self.icon = name
             .filter(|name| !name.is_empty())
-            .and_then(|name| find_icon(name, self.icon_theme_path.as_deref()))
-            .map(|path| match path.extension().and_then(|ext| ext.to_str()) {
-                Some("svg") => Icon::Svg(svg::Handle::from_path(path)),
-                _ => Icon::Raster(image::Handle::from_path(path)),
-            })
+            .and_then(|name| lookup(name, self.icon_theme_path.as_deref()))
             .or_else(|| pixmaps.and_then(pixmap_icon));
     }
+}
+
+/// Resolves an icon name or absolute path, searching `theme_path` before the icon theme.
+pub fn lookup(name: &str, theme_path: Option<&str>) -> Option<Icon> {
+    let path = find_icon(name, theme_path)?;
+    Some(match path.extension().and_then(|ext| ext.to_str()) {
+        Some("svg") => Icon::Svg(svg::Handle::from_path(path)),
+        _ => Icon::Raster(image::Handle::from_path(path)),
+    })
 }
 
 /// Registers as a StatusNotifierHost and streams item changes.

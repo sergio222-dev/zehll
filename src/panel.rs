@@ -262,16 +262,49 @@ pub fn notification_card<'a>(bar: &'a Bar, notification: &'a notifications::Noti
     if !notification.body.is_empty() {
         content = content.push(text(&notification.body).size(13).color(theme.text_muted));
     }
+    let buttons = Row::with_children(notification.buttons().map(|action| {
+        button(container(text(action.label.to_uppercase()).font(CONDENSED_BOLD).size(13)).center_y(26).padding([0, 10]))
+            .on_press(Message::InvokeAction(notification.id, action.key.clone()))
+            .padding(0)
+            .style(move |_, status| {
+                let mut style = glow_style(theme, status, 6.0);
+                if style.border.width == 0.0 {
+                    style.border = iced::Border { color: theme.border, width: 1.0, radius: 0.0.into() };
+                }
+                style
+            })
+            .into()
+    }))
+    .spacing(6);
+    if notification.buttons().next().is_some() {
+        content = content.push(buttons);
+    }
+    let content: Element<'a, Message> = match &notification.icon {
+        Some(icon) => {
+            let icon: Element<'a, Message> = match icon {
+                crate::tray::Icon::Raster(handle) => iced::widget::image(handle.clone()).width(32).height(32).into(),
+                crate::tray::Icon::Svg(handle) => iced::widget::svg(handle.clone()).width(32).height(32).into(),
+            };
+            row![icon, content].spacing(10).into()
+        }
+        None => content.into(),
+    };
     let border = if notification.critical { theme.accent } else { theme.border };
-    container(content)
+    let card = container(content)
         .padding([8, 10])
         .width(Length::Fill)
         .style(move |_| iced::widget::container::Style {
             background: Some(theme.section_background.into()),
             border: iced::Border { color: border, width: 1.0, radius: 0.0.into() },
             ..Default::default()
-        })
-        .into()
+        });
+    // Clicking the notification triggers its default action, as most daemons do.
+    match notification.has_default_action() {
+        true => iced::widget::mouse_area(card)
+            .on_press(Message::InvokeAction(notification.id, String::from(notifications::DEFAULT_ACTION)))
+            .into(),
+        false => card.into(),
+    }
 }
 
 fn footer_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'a, Message> {
