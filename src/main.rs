@@ -369,6 +369,7 @@ enum Message {
     ToggleCalendar,
     SelectDay(NaiveDate),
     OpenMeetingLink(String),
+    MeetingTest,
     DismissMeetingAlert(String, NaiveDateTime),
     JoinMeetingAlert(String, NaiveDateTime),
     SignedInMeetings,
@@ -418,7 +419,10 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         time::every(MEETINGS_POLL).map(|_| Message::FetchMeetings),
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
         Subscription::run(tray::events).map(Message::Tray),
-        Subscription::run(shortcuts::panel_toggle).map(|_| Message::TogglePanel),
+        Subscription::run(shortcuts::events).map(|shortcut| match shortcut {
+            shortcuts::Shortcut::PanelToggle => Message::TogglePanel,
+            shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
+        }),
         Subscription::run(notifications::events).map(Message::Notifications),
         window::close_events().map(Message::WindowClosed),
         panel,
@@ -720,6 +724,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             open_link(&link);
             return close_calendar(bar);
         }
+        Message::MeetingTest => return show_alert_cards(bar, vec![meetings::test_meeting(bar.now.naive_local())]),
         Message::DismissMeetingAlert(id, start) => {
             bar.meeting_alerts.retain(|meeting| meeting.id != id || meeting.start != start);
             return sync_alert_cards(bar);
@@ -899,7 +904,7 @@ fn meeting_alerts(bar: &mut Bar) -> Vec<Task<Message>> {
         .map(|(kind, meeting)| (kind, meeting.clone()))
         .collect();
     let mut tasks = Vec::new();
-    let mut started = false;
+    let mut started = Vec::new();
     for (kind, meeting) in due {
         match kind {
             meetings::AlertKind::Warning => {
@@ -907,18 +912,21 @@ fn meeting_alerts(bar: &mut Bar) -> Vec<Task<Message>> {
                 let send = async move { notifications::send("Calendar", "x-office-calendar", &summary, &body).await };
                 tasks.push(Task::future(send).discard());
             }
-            meetings::AlertKind::Start => {
-                bar.meeting_alerts.push(meeting);
-                started = true;
-            }
+            meetings::AlertKind::Start => started.push(meeting),
         }
     }
-    if started {
-        // The cards open where the calendar popover is.
-        tasks.push(close_calendar(bar));
-        tasks.push(sync_alert_cards(bar));
-    }
+    tasks.push(show_alert_cards(bar, started));
     tasks
+}
+
+/// Adds alert cards for `started` meetings.
+fn show_alert_cards(bar: &mut Bar, started: Vec<meetings::Meeting>) -> Task<Message> {
+    if started.is_empty() {
+        return Task::none();
+    }
+    bar.meeting_alerts.extend(started);
+    // The cards open where the calendar popover is.
+    Task::batch([close_calendar(bar), sync_alert_cards(bar)])
 }
 
 /// Opens a meeting's Meet link or event page in the browser.

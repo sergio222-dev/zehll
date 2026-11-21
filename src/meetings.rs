@@ -262,6 +262,19 @@ pub async fn sign_in() {
     }
 }
 
+/// Fake meeting starting at `now`, for trying the alert card without a real one.
+pub fn test_meeting(now: NaiveDateTime) -> Meeting {
+    Meeting {
+        // Nanoseconds keep two quick presses apart, so dismissing one card leaves the other.
+        id: format!("test-{}", now.and_utc().timestamp_nanos_opt().unwrap_or_default()),
+        title: "Test meeting".into(),
+        start: now,
+        end: now + TimeDelta::minutes(30),
+        calendar: "Test".into(),
+        link: "https://meet.google.com/".into(),
+    }
+}
+
 /// Minutes before the start at which the heads-up notification fires.
 pub const LEAD_MINUTES: i64 = 5;
 /// How long after the start a missed alert card still opens (e.g. after a late fetch).
@@ -497,6 +510,16 @@ mod tests {
 
     fn due(meetings: &[Meeting], now: NaiveDateTime, fired: &mut HashSet<String>) -> Vec<(AlertKind, String)> {
         due_alerts(meetings, now, fired).into_iter().map(|(kind, m)| (kind, m.id.clone())).collect()
+    }
+
+    #[test]
+    fn test_meeting_starts_now_with_a_meet_link() {
+        let m = test_meeting(at(21, 10, 0));
+        assert_eq!((m.title.as_str(), m.start, m.end), ("Test meeting", at(21, 10, 0), at(21, 10, 30)));
+        assert!(has_meet_link(&m));
+        assert_eq!(started_label(&m, at(21, 10, 0)), "STARTING NOW");
+        // Each press is a separate card, even within the same minute.
+        assert_ne!(m.id, test_meeting(at(21, 10, 0) + TimeDelta::seconds(1)).id);
     }
 
     #[test]
