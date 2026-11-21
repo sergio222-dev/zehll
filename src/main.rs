@@ -1,12 +1,14 @@
+mod calendar;
 mod hyprland;
 mod menu;
+mod panel;
 mod shape;
 mod system;
 mod theme;
 mod tray;
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -14,7 +16,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate};
 use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{Column, Row, Space, Stack, button, canvas, column, container, image, mouse_area, row, svg, text};
 use iced::window::Id;
-use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Shadow, Subscription, Task, time, window};
+use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Shadow, Subscription, Task, keyboard, time, window};
 use iced_layershell::actions::IcedNewPopupSettings;
 use iced_layershell::daemon;
 use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption, PopupAnchor, PopupGravity};
@@ -75,22 +77,35 @@ struct Bar {
     now: DateTime<Local>,
     uptime: Duration,
     todos: system::Todos,
+    // Every surface besides the bars, kept until the compositor reports it closed so a surface
+    // playing its close animation is never drawn as a bar.
+    surfaces: HashMap<Id, Surface>,
     tooltip: Option<Id>,
-    // Still rendered as a tooltip while the compositor plays its close animation.
-    closing_tooltip: Option<Id>,
     tray_client: Option<Arc<Client>>,
     // Keyed by D-Bus address, which keeps the icon order stable.
     tray_items: BTreeMap<String, tray::TrayItem>,
-    tray_menu: Option<OpenMenu>,
-    // Still rendered as a menu while the compositor plays its close animation.
-    closing_tray_menu: Option<OpenMenu>,
+    tray_menu: Option<Id>,
+    panel: Option<OpenPanel>,
+    calendar_month: NaiveDate,
+}
+
+enum Surface {
+    Tooltip,
+    TrayMenu(OpenMenu),
+    Panel,
+    // Transparent full-screen layer below the panel; clicking it closes the panel.
+    Catcher,
 }
 
 struct OpenMenu {
-    id: Id,
     address: String,
     // Ids of the submenus entered from the root.
     path: Vec<i32>,
+}
+
+struct OpenPanel {
+    panel: Id,
+    catcher: Id,
 }
 
 impl Bar {
@@ -102,14 +117,23 @@ impl Bar {
             now: Local::now(),
             uptime: Duration::ZERO,
             todos: system::Todos::default(),
+            surfaces: HashMap::new(),
             tooltip: None,
-            closing_tooltip: None,
             tray_client: None,
             tray_items: BTreeMap::new(),
             tray_menu: None,
-            closing_tray_menu: None,
+            panel: None,
+            calendar_month: panel::first_of_month(Local::now().date_naive()),
         };
         (bar, Task::none())
+    }
+
+    fn open_menu(&self) -> Option<(Id, &OpenMenu)> {
+        let id = self.tray_menu?;
+        match self.surfaces.get(&id)? {
+            Surface::TrayMenu(open) => Some((id, open)),
+            _ => None,
+        }
     }
 
     fn menu_title(&self, address: &str) -> Option<String> {
@@ -132,18 +156,32 @@ enum Message {
     NavigateTrayMenu(Vec<i32>),
     ActivateTrayMenuItem(i32),
     WindowClosed(Id),
+    TogglePanel,
+    OpenPanel,
+    ClosePanel,
+    Key(keyboard::Event),
+    CalendarMonth(i32),
+    ReloadShell,
+    PowerMenu,
 }
 
 fn namespace() -> String {
     String::from("zehll")
 }
 
-fn subscription(_: &Bar) -> Subscription<Message> {
+fn subscription(bar: &Bar) -> Subscription<Message> {
+    // Keys are only needed to close the panel with Escape.
+    let keys = match bar.panel {
+        Some(_) => keyboard::listen().map(Message::Key),
+        None => Subscription::none(),
+    };
     Subscription::batch([
         time::every(Duration::from_secs(1)).map(|_| Message::Tick),
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
         Subscription::run(tray::events).map(Message::Tray),
+        Subscription::run(panel::toggle_signals).map(|_| Message::TogglePanel),
         window::close_events().map(Message::WindowClosed),
+        keys,
     ])
 }
 
@@ -156,7 +194,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 bar.theme_modified = modified;
                 bar.theme = theme::Theme::load();
             }
-            if bar.tooltip.is_some() {
+            if bar.tooltip.is_some() || bar.panel.is_some() {
                 bar.uptime = system::uptime().unwrap_or_default();
             }
         }
@@ -193,6 +231,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
 
             let id = Id::unique();
             bar.tooltip = Some(id);
+            bar.surfaces.insert(id, Surface::Tooltip);
             return Task::done(Message::NewLayerShell { settings, id });
         }
         Message::Tray(tray::TrayEvent::Ready(client)) => bar.tray_client = Some(client),
@@ -202,7 +241,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             TrayEvent::Remove(address) => {
                 bar.tray_items.remove(&address);
-                if bar.tray_menu.as_ref().is_some_and(|open| open.address == address) {
+                if bar.open_menu().is_some_and(|(_, open)| open.address == address) {
                     return close_tray_menu(bar);
                 }
             }
@@ -246,26 +285,26 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             settings.anchor = PopupAnchor::Bottom;
             settings.gravity = PopupGravity::Bottom;
             let id = Id::unique();
-            bar.tray_menu = Some(OpenMenu { id, address, path: Vec::new() });
+            bar.tray_menu = Some(id);
+            bar.surfaces.insert(id, Surface::TrayMenu(OpenMenu { address, path: Vec::new() }));
             return close.chain(Task::done(Message::NewPopUp { settings, id }));
         }
         Message::NavigateTrayMenu(path) => {
-            let Some(open) = &bar.tray_menu else {
+            let Some((id, open)) = bar.open_menu() else {
                 return Task::none();
             };
             let has_header = bar.menu_title(&open.address).is_some();
             let Some(menu) = bar.tray_items.get(&open.address).and_then(|item| item.menu.as_ref()) else {
                 return Task::none();
             };
-            let (width, height) = menu::size(&menu::entries(menu, &path), !path.is_empty(), has_header);
-            let Some(open) = &mut bar.tray_menu else {
-                return Task::none();
-            };
-            open.path = path;
-            return Task::done(Message::SizeChange { id: open.id, size: (width, height + menu::GAP as u32) });
+            let size = menu::size(&menu::entries(menu, &path), !path.is_empty(), has_header);
+            if let Some(Surface::TrayMenu(open)) = bar.surfaces.get_mut(&id) {
+                open.path = path;
+            }
+            return Task::done(Message::SizeChange { id, size: (size.0, size.1 + menu::GAP as u32) });
         }
         Message::ActivateTrayMenuItem(submenu_id) => {
-            let Some(open) = &bar.tray_menu else {
+            let Some((_, open)) = bar.open_menu() else {
                 return Task::none();
             };
             let Some(menu_path) = bar.tray_items.get(&open.address).and_then(|item| item.menu_path.clone()) else {
@@ -275,21 +314,45 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return activate_tray(bar, request).chain(close_tray_menu(bar));
         }
         Message::WindowClosed(id) => {
-            if bar.tray_menu.as_ref().is_some_and(|open| open.id == id) {
+            bar.surfaces.remove(&id);
+            // The compositor dismissed it, for example a popup clicked outside.
+            if bar.tray_menu == Some(id) {
                 bar.tray_menu = None;
             }
-            if bar.closing_tray_menu.as_ref().is_some_and(|open| open.id == id) {
-                bar.closing_tray_menu = None;
-            }
-            if bar.closing_tooltip == Some(id) {
-                bar.closing_tooltip = None;
+            if bar.panel.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
+                return close_panel(bar);
             }
         }
         Message::HideTooltip => {
             if let Some(id) = bar.tooltip.take() {
-                bar.closing_tooltip = Some(id);
                 return Task::done(Message::RemoveWindow(id));
             }
+        }
+        Message::TogglePanel => {
+            return if bar.panel.is_some() { close_panel(bar) } else { open_panel(bar) };
+        }
+        Message::OpenPanel => {
+            if bar.panel.is_none() {
+                return open_panel(bar);
+            }
+        }
+        Message::ClosePanel => return close_panel(bar),
+        Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+            return close_panel(bar);
+        }
+        Message::CalendarMonth(delta) => bar.calendar_month = panel::shift_month(bar.calendar_month, delta),
+        Message::ReloadShell => {
+            // Start a fresh instance and leave; it takes over the D-Bus names once this one exits.
+            match std::env::current_exe().and_then(|exe| std::process::Command::new(exe).spawn()) {
+                Ok(_) => std::process::exit(0),
+                Err(err) => eprintln!("zehll: cannot restart: {err}"),
+            }
+        }
+        Message::PowerMenu => {
+            if let Err(err) = std::process::Command::new("wlogout").spawn() {
+                eprintln!("zehll: cannot start wlogout: {err}");
+            }
+            return close_panel(bar);
         }
         _ => {}
     }
@@ -297,12 +360,60 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
 }
 
 fn close_tray_menu(bar: &mut Bar) -> Task<Message> {
-    let Some(open) = bar.tray_menu.take() else {
+    match bar.tray_menu.take() {
+        Some(id) => Task::done(Message::RemoveWindow(id)),
+        None => Task::none(),
+    }
+}
+
+fn open_panel(bar: &mut Bar) -> Task<Message> {
+    let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
-    let id = open.id;
-    bar.closing_tray_menu = Some(open);
-    Task::done(Message::RemoveWindow(id))
+    bar.uptime = system::uptime().unwrap_or_default();
+    bar.calendar_month = panel::first_of_month(bar.now.date_naive());
+
+    // Layer surfaces have no "click outside" event, so a transparent layer covering the screen
+    // catches those clicks. It is created first so the panel stacks above it.
+    let catcher = NewLayerShellSettings {
+        size: Some((0, 0)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+        exclusive_zone: Some(-1),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::OutputName(output.clone()),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-panel-catcher")),
+    };
+    let panel = NewLayerShellSettings {
+        size: Some((panel::WIDTH, 0)),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top | Anchor::Bottom | Anchor::Right,
+        exclusive_zone: Some(0),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::OutputName(output),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-panel")),
+    };
+    let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
+    bar.surfaces.insert(open.catcher, Surface::Catcher);
+    bar.surfaces.insert(open.panel, Surface::Panel);
+    let task = Task::done(Message::NewLayerShell { settings: catcher, id: open.catcher })
+        .chain(Task::done(Message::NewLayerShell { settings: panel, id: open.panel }));
+    bar.panel = Some(open);
+    task
+}
+
+fn close_panel(bar: &mut Bar) -> Task<Message> {
+    let Some(open) = bar.panel.take() else {
+        return Task::none();
+    };
+    Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
 }
 
 fn activate_tray(bar: &Bar, request: ActivateRequest) -> Task<Message> {
@@ -318,11 +429,17 @@ fn activate_tray(bar: &Bar, request: ActivateRequest) -> Task<Message> {
 }
 
 fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
-    if bar.tooltip == Some(id) || bar.closing_tooltip == Some(id) {
-        return clock_tooltip(bar);
-    }
-    if let Some(open) = [&bar.tray_menu, &bar.closing_tray_menu].into_iter().flatten().find(|open| open.id == id) {
-        return tray_menu_view(bar, open);
+    match bar.surfaces.get(&id) {
+        Some(Surface::Tooltip) => return clock_tooltip(bar),
+        Some(Surface::TrayMenu(open)) => return tray_menu_view(bar, open),
+        Some(Surface::Panel) => return panel::view(bar),
+        Some(Surface::Catcher) => {
+            return mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .on_press(Message::ClosePanel)
+                .on_right_press(Message::ClosePanel)
+                .into();
+        }
+        None => {}
     }
 
     let theme = bar.theme;
@@ -354,11 +471,12 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
             container(window).width(Length::FillPortion(1)).clip(true),
             container(clock).center_x(Length::FillPortion(1)),
             container(tray_view(bar, id)).align_right(Length::FillPortion(1)),
+            // Hovering the right edge opens the side panel, like ii.
+            mouse_area(Space::new().width(f32::from(BAR_PADDING)).height(Length::Fill)).on_enter(Message::OpenPanel),
         ]
         .height(Length::Fill)
         .align_y(Alignment::Center),
     )
-    .padding(Padding::ZERO.right(f32::from(BAR_PADDING)))
     .height(Length::Fill);
 
     container(column![content, line(theme.bar_border)])
@@ -581,9 +699,13 @@ fn glow_style(theme: theme::Theme, status: button::Status, blur: f32) -> button:
 }
 
 fn icon(name: &str) -> Element<'_, Message> {
+    icon_sized(name, 16.0)
+}
+
+fn icon_sized(name: &str, size: f32) -> Element<'_, Message> {
     text(name)
         .font(ICON_FONT)
-        .size(16)
+        .size(size)
         .shaping(text::Shaping::Advanced)
         .into()
 }

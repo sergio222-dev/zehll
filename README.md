@@ -9,6 +9,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - Active window class and title, updated live from the Hyprland event socket.
 - Clock with a hover tooltip: full date, system uptime and pending tasks from the `ii` todo list.
 - System tray (StatusNotifierItem): icons, left/middle click activation and right-click context menus (DBusMenu) with submenus and toggles.
+- Side panel with uptime, reload and power actions, and a month calendar.
 - One bar per monitor.
 - Material 3 theme loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -26,6 +27,16 @@ cargo run --release
 ```
 
 Debug builds start noticeably slower because the GPU renderer is unoptimized.
+
+## Side panel
+
+Hover the right edge of the bar to open the side panel. Click outside it or press Escape to close it. Zehll toggles the panel on `SIGUSR1`, so a Hyprland keybind can drive it:
+
+```
+bind = SUPER, N, exec, pkill -USR1 -x zehll
+```
+
+The power button runs [wlogout](https://github.com/ArtsyMacaw/wlogout).
 
 ## Theme
 
