@@ -15,6 +15,7 @@ mod shortcuts;
 mod state;
 mod system;
 mod theme;
+mod todo;
 mod tray;
 
 use std::borrow::Cow;
@@ -116,6 +117,9 @@ struct Bar {
     // Newest first.
     popups: Vec<Popup>,
     popup_surface: Option<Id>,
+    panel_tab: panel::Tab,
+    todo_items: Vec<todo::Item>,
+    todo_input: String,
 }
 
 struct Popup {
@@ -172,6 +176,9 @@ impl Bar {
             do_not_disturb: state.do_not_disturb,
             popups: Vec::new(),
             popup_surface: None,
+            panel_tab: panel::Tab::Calendar,
+            todo_items: Vec::new(),
+            todo_input: String::new(),
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -235,6 +242,11 @@ enum Message {
     ToggleDoNotDisturb,
     HidePopup(u32),
     InvokeAction(u32, String),
+    SelectTab(panel::Tab),
+    TodoInput(String),
+    AddTodo,
+    ToggleTodo(usize, String),
+    RemoveTodo(usize, String),
 }
 
 fn namespace() -> String {
@@ -487,6 +499,22 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return notifications_closed(bar, ids).chain(hide_popups(bar, |_| true));
         }
         Message::HidePopup(id) => return hide_popups(bar, |popup| popup.id == id),
+        Message::SelectTab(tab) => {
+            bar.panel_tab = tab;
+            if tab == panel::Tab::Todo {
+                bar.todo_items = todo::load();
+            }
+        }
+        Message::TodoInput(input) => bar.todo_input = input,
+        Message::AddTodo => {
+            let content = bar.todo_input.trim().to_owned();
+            if !content.is_empty() {
+                bar.todo_input.clear();
+                update_todos(bar, |items| items.push(todo::Item { content, done: false }));
+            }
+        }
+        Message::ToggleTodo(index, content) => update_todos(bar, |items| todo::toggle(items, index, &content)),
+        Message::RemoveTodo(index, content) => update_todos(bar, |items| todo::remove(items, index, &content)),
         Message::InvokeAction(id, key) => {
             // The specification lets the server close a notification once an action ran.
             let invoke = match bar.notifications_handle.clone() {
@@ -515,6 +543,14 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         _ => {}
     }
     Task::none()
+}
+
+/// Applies `change` to a fresh read of the todo file, since ii may have edited it meanwhile.
+fn update_todos(bar: &mut Bar, change: impl FnOnce(&mut Vec<todo::Item>)) {
+    let mut items = todo::load();
+    change(&mut items);
+    todo::save(&items);
+    bar.todo_items = items;
 }
 
 fn hide_popups(bar: &mut Bar, hide: impl Fn(&Popup) -> bool) -> Task<Message> {
@@ -580,6 +616,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
     };
     bar.uptime = system::uptime().unwrap_or_default();
     bar.calendar_month = panel::first_of_month(bar.now.date_naive());
+    bar.todo_items = todo::load();
 
     // Layer surfaces have no "click outside" event, so a transparent layer covering the screen
     // catches those clicks. It is created first so the panel stacks above it.

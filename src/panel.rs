@@ -1,13 +1,21 @@
 use chrono::{Datelike, NaiveDate};
-use iced::widget::{Column, Row, Space, Stack, button, column, container, row, scrollable, text};
+use iced::widget::{Column, Row, Space, Stack, button, column, container, row, scrollable, text, text_input};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::{
     BODY_BOLD, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, audio, calendar, glow_style, line,
-    network, nightlight, notifications, panel_style, shape, slanted, system,
+    BODY_FONT, network, nightlight, notifications, panel_style, shape, slanted, system,
 };
 
 pub const WIDTH: u32 = 460;
+// The tools section keeps one height across tabs so the panel does not jump when switching.
+const TOOLS_HEIGHT: f32 = 300.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Calendar,
+    Todo,
+}
 const PADDING: u16 = 16;
 const DAY_HEIGHT: f32 = 34.0;
 const WEEKDAYS: [&str; 7] = ["MO", "TU", "WE", "TH", "FR", "SA", "SU"];
@@ -17,7 +25,7 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     let content = column![header(bar)]
         .push(quick_settings(bar))
         .push(notifications_view(bar))
-        .push(calendar_view(bar))
+        .push(tools_view(bar))
         .spacing(14)
         .padding(PADDING);
     let content = container(content).width(Length::Fill).height(Length::Fill).style(move |_| {
@@ -315,6 +323,95 @@ fn footer_button<'a>(bar: &'a Bar, icon: &'a str, message: Message) -> Element<'
     button(content).on_press(message).padding(0).style(move |_, status| glow_style(theme, status, 10.0)).into()
 }
 
+fn tools_view(bar: &Bar) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let tabs = column![
+        tab_button(bar, Tab::Calendar, "calendar_month", "CALENDAR"),
+        tab_button(bar, Tab::Todo, "checklist", "TO DO"),
+    ]
+    .spacing(6);
+    let content = match bar.panel_tab {
+        Tab::Calendar => calendar_view(bar),
+        Tab::Todo => todo_view(bar),
+    };
+    let content = container(content).width(Length::Fill).height(TOOLS_HEIGHT);
+    container(row![container(tabs).height(TOOLS_HEIGHT).align_bottom(TOOLS_HEIGHT), content].spacing(10))
+        .padding(12)
+        .width(Length::Fill)
+        .style(move |_| panel_style(theme))
+        .into()
+}
+
+fn tab_button<'a>(bar: &'a Bar, tab: Tab, icon: &'a str, label: &'a str) -> Element<'a, Message> {
+    let theme = bar.theme;
+    let active = bar.panel_tab == tab;
+    let color = if active { theme.text } else { theme.text_muted };
+    let content = column![
+        text(icon).font(ICON_FONT).size(18).color(color).shaping(text::Shaping::Advanced),
+        text(label).font(CONDENSED_BOLD).size(13).color(color),
+    ]
+    .spacing(4)
+    .align_x(Alignment::Center);
+    button(container(content).center_x(64).center_y(56))
+        .on_press(Message::SelectTab(tab))
+        .padding(0)
+        .style(move |_, status| {
+            // The active tab keeps the hover glow.
+            let status = if active { button::Status::Hovered } else { status };
+            glow_style(theme, status, 10.0)
+        })
+        .into()
+}
+
+fn todo_view(bar: &Bar) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let input = text_input("Add a task", &bar.todo_input)
+        .on_input(Message::TodoInput)
+        .on_submit(Message::AddTodo)
+        .font(BODY_FONT)
+        .size(14)
+        .padding([7, 10])
+        .style(move |_, status| text_input::Style {
+            background: theme.section_background.into(),
+            border: iced::Border {
+                color: if matches!(status, text_input::Status::Focused { .. }) { theme.glow } else { theme.border },
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            icon: theme.text_muted,
+            placeholder: theme.text_dim,
+            value: theme.text,
+            selection: iced::Color { a: 0.3, ..theme.glow },
+        });
+    let add = button(container(crate::icon_sized("add", 18.0)).center(34))
+        .on_press(Message::AddTodo)
+        .padding(0)
+        .style(move |_, status| glow_style(theme, status, 8.0));
+    let input = row![input, add].spacing(8).align_y(Alignment::Center);
+
+    let list: Element<'_, Message> = if bar.todo_items.is_empty() {
+        container(text("NO TASKS").font(CONDENSED_BOLD).size(16).color(theme.text_muted)).center(Length::Fill).into()
+    } else {
+        let items = Column::with_children(bar.todo_items.iter().enumerate().map(|(index, item)| {
+            let check = if item.done { "check_box" } else { "check_box_outline_blank" };
+            let toggle = button(text(check).font(ICON_FONT).size(20).color(if item.done { theme.accent } else { theme.text }).shaping(text::Shaping::Advanced))
+                .on_press(Message::ToggleTodo(index, item.content.clone()))
+                .padding(2)
+                .style(move |_, status| glow_style(theme, status, 6.0));
+            let delete = button(crate::icon_sized("delete", 16.0))
+                .on_press(Message::RemoveTodo(index, item.content.clone()))
+                .padding(4)
+                .style(move |_, status| glow_style(theme, status, 6.0));
+            let label = text(&item.content).size(14).color(if item.done { theme.text_muted } else { theme.text }).width(Length::Fill);
+            row![toggle, label, delete].spacing(8).align_y(Alignment::Center).into()
+        }))
+        .spacing(4)
+        .padding(Padding::ZERO.right(8.0));
+        scrollable(items).height(Length::Fill).into()
+    };
+    column![input, list].spacing(10).into()
+}
+
 fn calendar_view(bar: &Bar) -> Element<'_, Message> {
     let theme = bar.theme;
     let month = bar.calendar_month;
@@ -350,11 +447,7 @@ fn calendar_view(bar: &Bar) -> Element<'_, Message> {
     }))
     .spacing(4);
 
-    container(column![header, weekdays, weeks].spacing(10))
-        .padding(12)
-        .width(Length::Fill)
-        .style(move |_| panel_style(theme))
-        .into()
+    column![header, weekdays, weeks].spacing(10).into()
 }
 
 fn day_cell<'a>(bar: &'a Bar, day: &calendar::Day, is_today: bool) -> Element<'a, Message> {

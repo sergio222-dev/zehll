@@ -1,5 +1,6 @@
-use std::path::PathBuf;
 use std::time::Duration;
+
+use crate::todo;
 
 const MAX_TODOS: usize = 5;
 
@@ -29,15 +30,8 @@ pub struct Todos {
 
 /// Unfinished tasks of the quickshell `ii` todo list.
 pub fn pending_todos() -> Todos {
-    let todos: Vec<serde_json::Value> = std::fs::read_to_string(todo_path())
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default();
-    let pending: Vec<&str> = todos
-        .iter()
-        .filter(|todo| todo["done"].as_bool() != Some(true))
-        .filter_map(|todo| todo["content"].as_str())
-        .collect();
+    let todos = todo::load();
+    let pending: Vec<&str> = todos.iter().filter(|todo| !todo.done).map(|todo| todo.content.as_str()).collect();
 
     if pending.is_empty() {
         return Todos { pending: 0, lines: vec![String::from("No pending tasks")] };
@@ -52,11 +46,4 @@ pub fn pending_todos() -> Todos {
         lines.push(format!("... and {} more", pending.len() - MAX_TODOS));
     }
     Todos { pending: pending.len(), lines }
-}
-
-fn todo_path() -> PathBuf {
-    let state = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state"));
-    state.join("quickshell/user/todo.json")
 }
