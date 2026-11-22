@@ -32,11 +32,13 @@ mod shape;
 mod shortcuts;
 mod state;
 mod subpanel;
+mod sysmon;
 mod system;
 mod theme;
 mod todo;
 mod trail;
 mod tray;
+mod usage;
 mod workspaces;
 
 use std::borrow::Cow;
@@ -68,6 +70,8 @@ const MEETINGS_POLL: Duration = Duration::from_secs(120);
 const FILES_DEBOUNCE: Duration = Duration::from_millis(150);
 // Wait before opening the bar of a monitor plugged in while Zehll runs (see `set_monitors`).
 const NEW_MONITOR_DELAY: Duration = Duration::from_millis(500);
+// How often the system indicator reads /proc.
+const USAGE_INTERVAL: Duration = Duration::from_secs(2);
 const PILL_BACKGROUND: Color = Color::from_rgb8(0x0d, 0x14, 0x30);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
@@ -192,6 +196,9 @@ struct Bar {
     media: Option<mpris::Player>,
     // Player popover and its click catcher.
     media_popover: Option<OpenPanel>,
+    usage: usage::Usage,
+    // System monitor sub-panel and its click catcher.
+    system_popover: Option<OpenPanel>,
     // Cover art URL last requested and its image once loaded.
     media_art_url: String,
     media_art: Option<image::Handle>,
@@ -217,6 +224,7 @@ enum Surface {
     Panel,
     Calendar,
     Media,
+    System,
     Launcher,
     MeetingAlerts,
     Popups,
@@ -229,6 +237,7 @@ enum Tooltip {
     Clock,
     Meeting,
     Media,
+    System,
 }
 
 struct OpenMenu {
@@ -304,6 +313,8 @@ impl Bar {
             calendar_day: Local::now().date_naive(),
             media: None,
             media_popover: None,
+            usage: usage::Usage::default(),
+            system_popover: None,
             media_art_url: String::new(),
             media_art: None,
             media_seek: None,
@@ -445,6 +456,9 @@ enum Message {
     // Redraws the workspace indicators while one is moving.
     WorkspaceFrame,
     FocusWorkspace(i64),
+    UsageTick,
+    UsageDetails((Vec<usage::Disk>, Option<usage::Gpu>)),
+    ToggleSystem,
     ToggleLauncher,
     LauncherQuery(String),
     LauncherNav(launcher::Nav),
@@ -504,7 +518,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         }),
         None => Subscription::none(),
     };
-    let calendar_keys = match bar.calendar.is_some() || bar.media_popover.is_some() {
+    let calendar_keys = match bar.calendar.is_some() || bar.media_popover.is_some() || bar.system_popover.is_some() {
         true => keyboard::listen().map(Message::Key),
         false => Subscription::none(),
     };
@@ -542,6 +556,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
     Subscription::batch([
         time::every(Duration::from_secs(1)).map(|_| Message::Tick),
         time::every(MEETINGS_POLL).map(|_| Message::FetchMeetings),
+        time::every(USAGE_INTERVAL).map(|_| Message::UsageTick),
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
         Subscription::run(hyprland::monitor_events).map(Message::Monitors),
         Subscription::run(tray::events).map(Message::Tray),
@@ -606,7 +621,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::ActiveWindow(window) => bar.window = window,
         Message::ShowTooltip(tooltip) => {
             // The tooltips open under the clock, where the calendar and player popovers are.
-            if bar.tooltip.is_some() || bar.calendar.is_some() || bar.media_popover.is_some() {
+            if bar.tooltip.is_some() || bar.calendar.is_some() || bar.media_popover.is_some() || bar.system_popover.is_some() {
                 return Task::none();
             }
             // A layer surface instead of an xdg_popup: layershellev grabs the pointer for every
@@ -627,6 +642,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 }
                 Tooltip::Meeting => MEETING_TOOLTIP_SIZE,
                 Tooltip::Media => media::TOOLTIP_SIZE,
+                Tooltip::System => sysmon::TOOLTIP_SIZE,
             };
             // The clock sits right of the centered workspaces, so the tooltips hang under the
             // pointer, like the tray menus, instead of under the bar's center.
@@ -750,6 +766,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.media_popover.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
                 return close_media(bar);
             }
+            if bar.system_popover.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
+                return close_system(bar);
+            }
         }
         Message::HideTooltip => {
             if let Some(id) = bar.tooltip.take() {
@@ -766,10 +785,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
         }
         // Sent by the click catcher, which the panel and the popovers use.
-        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_launcher(bar)]),
+        Message::ClosePanel => {
+            return Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_system(bar), close_launcher(bar)]);
+        }
         Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
-            if bar.calendar.is_some() || bar.media_popover.is_some() {
-                return Task::batch([close_calendar(bar), close_media(bar)]);
+            if bar.calendar.is_some() || bar.media_popover.is_some() || bar.system_popover.is_some() {
+                return Task::batch([close_calendar(bar), close_media(bar), close_system(bar)]);
             }
             // Escape closes the sub-panel first, then the panel.
             if bar.subpanel.take().is_none() {
@@ -900,6 +921,16 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let id = Id::unique();
             bar.bars.insert(id, name.clone());
             return Task::done(Message::NewLayerShell { settings: bar_settings(name), id });
+        }
+        Message::UsageTick => {
+            bar.usage.sample(Instant::now());
+            if bar.system_popover.is_some() {
+                return Task::perform(usage::details(), Message::UsageDetails);
+            }
+        }
+        Message::UsageDetails((disks, gpu)) => bar.usage.set_details(disks, gpu),
+        Message::ToggleSystem => {
+            return if bar.system_popover.is_some() { close_system(bar) } else { open_system(bar) };
         }
         Message::FocusWorkspace(workspace) => {
             hyprland::focus_workspace(workspace);
@@ -1508,7 +1539,7 @@ fn open_calendar(bar: &mut Bar) -> Task<Message> {
     })
     .chain(Task::done(Message::NewLayerShell { settings: popover, id: open.panel }));
     bar.calendar = Some(open);
-    Task::batch([close_panel(bar), close_media(bar), Task::done(Message::HideTooltip), task, fetch])
+    Task::batch([close_panel(bar), close_media(bar), close_system(bar), Task::done(Message::HideTooltip), task, fetch])
 }
 
 /// Opens the player popover under the media button, closing the panel, the calendar and the tooltip.
@@ -1537,7 +1568,54 @@ fn open_media(bar: &mut Bar) -> Task<Message> {
     })
     .chain(Task::done(Message::NewLayerShell { settings: popover, id: open.panel }));
     bar.media_popover = Some(open);
-    Task::batch([close_panel(bar), close_calendar(bar), Task::done(Message::HideTooltip), task])
+    Task::batch([close_panel(bar), close_calendar(bar), close_system(bar), Task::done(Message::HideTooltip), task])
+}
+
+/// Opens the system monitor under the bar, closing the panel, the other popovers and the tooltip.
+fn open_system(bar: &mut Bar) -> Task<Message> {
+    let Some(output) = hyprland::focused_monitor() else {
+        return Task::none();
+    };
+    let popover = NewLayerShellSettings {
+        size: Some((sysmon::WIDTH, sysmon::HEIGHT)),
+        layer: Layer::Overlay,
+        // Anchored only to the top, so it is centered under the bar like the player.
+        anchor: Anchor::Top,
+        exclusive_zone: Some(0),
+        margin: Some((14, 0, 0, 0)),
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::OutputName(output.clone()),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-system")),
+    };
+    let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
+    bar.surfaces.insert(open.catcher, Surface::Catcher);
+    bar.surfaces.insert(open.panel, Surface::System);
+    let task = Task::done(Message::NewLayerShell {
+        settings: catcher_settings(output, "zehll-system-catcher"),
+        id: open.catcher,
+    })
+    .chain(Task::done(Message::NewLayerShell { settings: popover, id: open.panel }));
+    bar.system_popover = Some(open);
+    bar.uptime = system::uptime().unwrap_or_default();
+    Task::batch([
+        close_panel(bar),
+        close_calendar(bar),
+        close_media(bar),
+        Task::done(Message::HideTooltip),
+        task,
+        Task::perform(usage::details(), Message::UsageDetails),
+    ])
+}
+
+fn close_system(bar: &mut Bar) -> Task<Message> {
+    let Some(open) = bar.system_popover.take() else {
+        return Task::none();
+    };
+    Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
 }
 
 /// Opens the launcher centered on the focused monitor, on Home, closing every popover.
@@ -1569,7 +1647,7 @@ fn open_launcher(bar: &mut Bar) -> Task<Message> {
     })
     .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }));
     bar.launcher_surface = Some(open);
-    Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), Task::done(Message::HideTooltip), task, load_apps()])
+    Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_system(bar), Task::done(Message::HideTooltip), task, load_apps()])
 }
 
 /// Reads the installed apps off the UI thread; the launcher keeps the previous list meanwhile.
@@ -1785,6 +1863,8 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Panel) => return panel::view(bar),
         Some(Surface::Calendar) => return agenda::view(bar),
         Some(Surface::Media) => return media::view(bar),
+        Some(Surface::System) => return sysmon::view(bar),
+        Some(Surface::Tooltip(Tooltip::System)) => return sysmon::tooltip(bar),
         Some(Surface::Launcher) => return launcher::view(bar),
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
@@ -1836,7 +1916,8 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
             container(window).width(Length::FillPortion(1)).clip(true),
             // The workspaces sit on the bar's center: both sides of the middle third fill equally.
             row![
-                container(Row::new().push(media::bar_button(bar))).align_right(Length::Fill),
+                container(Row::new().push(sysmon::bar_button(bar)).push(media::bar_button(bar)).spacing(6).align_y(Alignment::Center))
+                    .align_right(Length::Fill),
                 workspace_indicator(bar, id),
                 container(Row::new().push(clock).push(meeting_pill(bar)).spacing(6).align_y(Alignment::Center))
                     .align_left(Length::Fill),

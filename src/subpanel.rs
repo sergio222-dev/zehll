@@ -76,7 +76,7 @@ fn frame<'a>(bar: &'a Bar, title: &'a str, count: String, scanning: bool, body: 
         .height(HEIGHT)
         .style(move |_| container::Style {
             // Opaque, so the panel behind does not show through.
-            background: Some(Color { a: 1.0, ..theme.popup_background }.into()),
+            background: Some(theme.popup_background.into()),
             border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
             shadow: iced::Shadow { color: Color { a: 0.55, ..Color::BLACK }, offset: iced::Vector::new(0.0, 18.0), blur_radius: 48.0 },
             ..Default::default()
@@ -150,7 +150,7 @@ fn audio(bar: &Bar) -> Element<'_, Message> {
         }))
         .spacing(2);
         device = device.push(container(scrollable(options)).max_height(220.0).padding(4).style(move |_| container::Style {
-            background: Some(Color { a: 1.0, ..theme.popup_background }.into()),
+            background: Some(theme.popup_background.into()),
             border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
             ..Default::default()
         }));
