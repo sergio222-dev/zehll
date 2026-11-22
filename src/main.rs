@@ -8,6 +8,7 @@ mod cava;
 mod dbus;
 mod flame;
 mod flashbang;
+mod fuzzy;
 mod hyprland;
 mod idle;
 mod launcher;
