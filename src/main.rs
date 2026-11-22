@@ -294,7 +294,7 @@ impl Bar {
             media_seek: None,
             media_spectrum: Vec::new(),
             media_flare: None,
-            launcher: launcher::Launcher::new(),
+            launcher: launcher::Launcher::with_scores(apps::load_scores()),
             launcher_surface: None,
         };
         let restore = match state.keep_awake {
@@ -307,7 +307,8 @@ impl Bar {
             false => restore,
         };
         let restore = restore.chain(fetch_meetings(&bar));
-        (bar, restore)
+        // Loaded now too, so the first opening of the launcher already lists them.
+        (bar, Task::batch([restore, load_apps()]))
     }
 
     fn save_state(&self) {
@@ -427,6 +428,7 @@ enum Message {
     LauncherQuery(String),
     LauncherNav(launcher::Nav),
     LauncherActivate(usize),
+    LauncherApps(Vec<apps::App>),
     // Rows to scroll and the list length.
     LauncherScroll(i32, usize),
 }
@@ -859,14 +861,15 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                     }
                 }
                 launcher::Nav::Move(delta) => bar.launcher.move_selection(delta, len),
-                launcher::Nav::Activate { .. } => return Task::batch([activate_launcher_item(bar, bar.launcher.selected), focus_launcher()]),
+                launcher::Nav::Activate { secondary } => return activate_launcher_item(bar, bar.launcher.selected, secondary),
                 // Ctrl+1..9 counts the rows on screen.
-                launcher::Nav::Pick(row) => return Task::batch([activate_launcher_item(bar, bar.launcher.first + row), focus_launcher()]),
+                launcher::Nav::Pick(row) => return activate_launcher_item(bar, bar.launcher.first + row, false),
             }
             // Escape takes the focus from the search field.
             return focus_launcher();
         }
-        Message::LauncherActivate(index) => return Task::batch([activate_launcher_item(bar, index), focus_launcher()]),
+        Message::LauncherActivate(index) => return activate_launcher_item(bar, index, false),
+        Message::LauncherApps(apps) => bar.launcher.apps = apps,
         Message::LauncherScroll(rows, len) => bar.launcher.scroll(rows, len),
         Message::Media(command) => {
             if let Some(player) = bar.media.clone() {
@@ -1368,7 +1371,9 @@ fn open_launcher(bar: &mut Bar) -> Task<Message> {
     let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
-    bar.launcher = launcher::Launcher::new();
+    bar.launcher.reset();
+    bar.launcher.now = Local::now().timestamp();
+    bar.launcher.running = hyprland::clients().into_iter().map(|(_, class)| class).collect();
     let surface = NewLayerShellSettings {
         size: Some((launcher::WIDTH, launcher::HEIGHT)),
         layer: Layer::Overlay,
@@ -1390,7 +1395,12 @@ fn open_launcher(bar: &mut Bar) -> Task<Message> {
     })
     .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }));
     bar.launcher_surface = Some(open);
-    Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), Task::done(Message::HideTooltip), task])
+    Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), Task::done(Message::HideTooltip), task, load_apps()])
+}
+
+/// Reads the installed apps off the UI thread; the launcher keeps the previous list meanwhile.
+fn load_apps() -> Task<Message> {
+    Task::perform(async { tokio::task::spawn_blocking(apps::load).await.unwrap_or_default() }, Message::LauncherApps)
 }
 
 fn close_launcher(bar: &mut Bar) -> Task<Message> {
@@ -1407,15 +1417,54 @@ fn focus_launcher() -> Task<Message> {
     iced::widget::operation::focus(launcher::input_id())
 }
 
-/// Runs the action of the launcher row at `index`.
-fn activate_launcher_item(bar: &mut Bar, index: usize) -> Task<Message> {
+/// Runs the action of the launcher row at `index`; `secondary` is Ctrl+Enter.
+fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<Message> {
     let Some(item) = launcher::items(&bar.launcher).into_iter().nth(index) else {
-        return Task::none();
+        return focus_launcher();
     };
     match item.action {
-        launcher::Action::Open(page) => bar.launcher.open(page),
+        launcher::Action::Open(page) => {
+            bar.launcher.open(page);
+            focus_launcher()
+        }
+        launcher::Action::App(index) => {
+            let Some(app) = bar.launcher.apps.get(index).cloned() else {
+                return focus_launcher();
+            };
+            launch_app(&app, secondary);
+            apps::bump(&mut bar.launcher.scores, &app.id, Local::now().timestamp());
+            apps::save_scores(&bar.launcher.scores);
+            close_launcher(bar)
+        }
+        launcher::Action::Power(power) => {
+            if !bar.launcher.confirm(power) {
+                return focus_launcher();
+            }
+            let ran = match power.command() {
+                Some(command) => hyprland::exec(command),
+                None => hyprland::exit(),
+            };
+            if !ran {
+                eprintln!("zehll: cannot run {power:?}");
+            }
+            close_launcher(bar)
+        }
     }
-    Task::none()
+}
+
+/// Focuses an open window of `app`, else starts it; `secondary` starts its first desktop action.
+fn launch_app(app: &apps::App, secondary: bool) {
+    let window = match secondary {
+        true => None,
+        false => hyprland::clients().into_iter().find(|(_, class)| apps::owns_window(app, class)),
+    };
+    let done = match window {
+        Some((address, _)) => hyprland::focus_window(&address),
+        None => hyprland::exec(&apps::launch_command(app, secondary, &apps::terminal())),
+    };
+    if !done {
+        eprintln!("zehll: cannot launch {}", app.id);
+    }
 }
 
 fn close_media(bar: &mut Bar) -> Task<Message> {

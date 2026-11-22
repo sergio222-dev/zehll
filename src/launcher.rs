@@ -1,9 +1,13 @@
 //! App launcher: a centered search box with pages, toggled with `zehll:launcherToggle`.
 
+use std::collections::HashMap;
+
 use iced::keyboard::{self, Modifiers, key::Named};
-use iced::widget::{self, Column, Row, Space, Stack, button, column, container, mouse_area, row, text, text_input};
+use iced::widget::{self, Column, Row, Space, Stack, button, column, container, image, mouse_area, row, svg, text, text_input};
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
+use crate::apps::{self, App, Score};
+use crate::{fuzzy, tray};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
@@ -13,6 +17,9 @@ const ROW_HEIGHT: f32 = 46.0;
 const SECTION_HEIGHT: f32 = 34.0;
 const LIST_PADDING: f32 = 8.0;
 const FOOTER_HEIGHT: f32 = 34.0;
+const APP_ICON: f32 = 22.0;
+// Open-window marker, the green of the media player's source tag.
+const RUNNING: Color = Color::from_rgb8(0x5f, 0xe3, 0x9a);
 pub const WIDTH: u32 = 720;
 // Search bar, list and footer, plus the two dividers.
 pub const HEIGHT: u32 = (SEARCH_HEIGHT + SECTION_HEIGHT + ROW_HEIGHT * VISIBLE_ROWS as f32 + LIST_PADDING + FOOTER_HEIGHT + 2.0) as u32;
@@ -83,41 +90,151 @@ impl Page {
     }
 }
 
+/// System commands listed in Home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Power {
+    Lock,
+    Suspend,
+    Logout,
+    Restart,
+    Shutdown,
+}
+
+impl Power {
+    const ALL: [Power; 5] = [Power::Lock, Power::Suspend, Power::Logout, Power::Restart, Power::Shutdown];
+
+    fn title(self) -> &'static str {
+        match self {
+            Power::Lock => "Lock",
+            Power::Suspend => "Suspend",
+            Power::Logout => "Logout",
+            Power::Restart => "Restart",
+            Power::Shutdown => "Shutdown",
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Power::Lock => "lock",
+            Power::Suspend => "bedtime",
+            Power::Logout => "logout",
+            Power::Restart => "restart_alt",
+            Power::Shutdown => "power_settings_new",
+        }
+    }
+
+    /// Commands that end the session ask for a second Enter.
+    pub fn needs_confirm(self) -> bool {
+        matches!(self, Power::Logout | Power::Restart | Power::Shutdown)
+    }
+
+    /// Shell command, or `None` for Logout, which asks Hyprland to exit.
+    pub fn command(self) -> Option<&'static str> {
+        match self {
+            Power::Lock => Some("loginctl lock-session"),
+            Power::Suspend => Some("systemctl suspend"),
+            Power::Logout => None,
+            Power::Restart => Some("systemctl reboot"),
+            Power::Shutdown => Some("systemctl poweroff"),
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Power::Lock => "loginctl lock-session",
+            Power::Suspend => "systemctl suspend",
+            Power::Logout => "Ends the Hyprland session; asks to confirm",
+            Power::Restart => "systemctl reboot; asks to confirm",
+            Power::Shutdown => "systemctl poweroff; asks to confirm",
+        }
+    }
+}
+
 /// What a launcher row does when activated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
     Open(Page),
+    /// Index into `Launcher::apps`.
+    App(usize),
+    Power(Power),
+}
+
+#[derive(Clone, Debug)]
+pub enum ItemIcon {
+    /// Material Symbols icon.
+    Symbol(&'static str),
+    App(Option<tray::Icon>),
 }
 
 /// One row of the launcher list.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Item {
-    pub icon: &'static str,
+    pub icon: ItemIcon,
     pub title: String,
     pub description: String,
     pub tag: &'static str,
+    /// An app with an open window.
+    pub running: bool,
     pub action: Action,
 }
 
-/// Rows of the current page. Home lists the pages whose name or description contains the search.
+/// Rows of the current page. Home ranks apps, pages and commands by how well they match the
+/// search plus each app's launch score; with an empty search, launched apps come first.
 pub fn items(launcher: &Launcher) -> Vec<Item> {
     match launcher.page() {
-        Page::Home => {
-            let query = launcher.query.to_lowercase();
-            Page::CHILDREN
-                .into_iter()
-                .filter(|page| page.title().to_lowercase().contains(&query) || page.description().to_lowercase().contains(&query))
-                .map(|page| Item {
-                    icon: page.icon(),
-                    title: page.title().to_string(),
-                    description: page.description().to_string(),
-                    tag: "PAGE",
-                    action: Action::Open(page),
-                })
-                .collect()
-        }
+        Page::Home => home_items(launcher),
         Page::Files | Page::Clipboard | Page::Keybinds | Page::Calculator => Vec::new(),
     }
+}
+
+fn home_items(launcher: &Launcher) -> Vec<Item> {
+    let query = launcher.query.as_str();
+    let best = |fields: &[&str]| fields.iter().filter_map(|field| fuzzy::score(query, field)).reduce(f32::max);
+    let mut ranked: Vec<(f64, Item)> = Vec::new();
+    for (index, app) in launcher.apps.iter().enumerate() {
+        let Some(score) = best(&[&app.name, &app.id, &app.description]) else {
+            continue;
+        };
+        let launch = launcher.scores.get(&app.id).map_or(0.0, |score| score.at(launcher.now));
+        let item = Item {
+            icon: ItemIcon::App(app.icon.clone()),
+            title: app.name.clone(),
+            description: app.description.clone(),
+            tag: "APPLICATION",
+            running: launcher.running.iter().any(|class| apps::owns_window(app, class)),
+            action: Action::App(index),
+        };
+        ranked.push((score as f64 + launch, item));
+    }
+    for page in Page::CHILDREN {
+        if let Some(score) = best(&[page.title(), page.description()]) {
+            let item = Item {
+                icon: ItemIcon::Symbol(page.icon()),
+                title: page.title().to_string(),
+                description: page.description().to_string(),
+                tag: "PAGE",
+                running: false,
+                action: Action::Open(page),
+            };
+            ranked.push((score as f64, item));
+        }
+    }
+    for power in Power::ALL {
+        if let Some(score) = best(&[power.title()]) {
+            let item = Item {
+                icon: ItemIcon::Symbol(power.icon()),
+                title: power.title().to_string(),
+                description: power.description().to_string(),
+                tag: if launcher.confirm == Some(power) { "CONFIRM ↵" } else { "COMMAND" },
+                running: false,
+                action: Action::Power(power),
+            };
+            ranked.push((score as f64, item));
+        }
+    }
+    // Stable: equal scores keep apps (by name), then pages, then commands.
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.into_iter().map(|(_, item)| item).collect()
 }
 
 /// Header above the list.
@@ -222,8 +339,20 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
 
 fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: bool) -> Element<'a, Message> {
     let icon_color = if selected { theme.glow } else { theme.text };
+    let icon: Element<'a, Message> = match item.icon {
+        ItemIcon::Symbol(name) => icon_colored(name, 18.0, icon_color),
+        ItemIcon::App(Some(tray::Icon::Svg(handle))) => svg(handle).width(APP_ICON).height(APP_ICON).into(),
+        ItemIcon::App(Some(tray::Icon::Raster(handle))) => image(handle).width(APP_ICON).height(APP_ICON).into(),
+        ItemIcon::App(None) => icon_colored("apps", 18.0, icon_color),
+    };
+    // A small diamond under the icon marks an app with an open window.
+    let running: Element<'a, Message> = match item.running {
+        true => container(shape(shape::Kind::Diamond, RUNNING)).width(8).height(8).into(),
+        false => Space::new().height(8).into(),
+    };
+    let icon = column![container(icon).center_x(26).height(APP_ICON), running].spacing(1).align_x(Alignment::Center);
     let content = row![
-        container(icon_colored(item.icon, 18.0, icon_color)).center_x(26),
+        icon,
         text(item.title).font(BODY_BOLD).size(15).wrapping(text::Wrapping::None),
         container(text(item.description).font(BODY_FONT).size(12).color(theme.text_muted).wrapping(text::Wrapping::None))
             .width(Length::Fill)
@@ -264,11 +393,51 @@ pub struct Launcher {
     pub selected: usize,
     // First row shown; follows the selection.
     pub first: usize,
+    /// Installed apps, kept between openings while a fresh list loads.
+    pub apps: Vec<App>,
+    /// Launch scores by desktop id.
+    pub scores: HashMap<String, Score>,
+    /// Classes of the open windows, read when the launcher opens.
+    pub running: Vec<String>,
+    /// Unix seconds when the launcher opened, for decaying launch scores.
+    pub now: i64,
+    /// Command waiting for a second Enter.
+    confirm: Option<Power>,
 }
 
 impl Launcher {
     pub fn new() -> Self {
-        Self { query: String::new(), stack: Vec::new(), selected: 0, first: 0 }
+        Self {
+            query: String::new(),
+            stack: Vec::new(),
+            selected: 0,
+            first: 0,
+            apps: Vec::new(),
+            scores: HashMap::new(),
+            running: Vec::new(),
+            now: 0,
+            confirm: None,
+        }
+    }
+
+    pub fn with_scores(scores: HashMap<String, Score>) -> Self {
+        Self { scores, ..Self::new() }
+    }
+
+    /// Back to an empty Home, keeping the loaded apps and scores.
+    pub fn reset(&mut self) {
+        self.stack.clear();
+        self.set_query(String::new());
+    }
+
+    /// Whether `power` should run now: at once, or on the second request when it needs confirming.
+    pub fn confirm(&mut self, power: Power) -> bool {
+        if !power.needs_confirm() || self.confirm == Some(power) {
+            self.confirm = None;
+            return true;
+        }
+        self.confirm = Some(power);
+        false
     }
 
     pub fn page(&self) -> Page {
@@ -284,6 +453,7 @@ impl Launcher {
         self.query = query;
         self.selected = 0;
         self.first = 0;
+        self.confirm = None;
     }
 
     /// Clears the search, else goes back a page. False when there is nothing to undo.
@@ -299,6 +469,7 @@ impl Launcher {
 
     /// Moves the selection, wrapping at both ends, and scrolls to keep it visible.
     pub fn move_selection(&mut self, delta: i32, len: usize) {
+        self.confirm = None;
         if len == 0 {
             self.selected = 0;
             self.first = 0;
@@ -420,18 +591,91 @@ mod tests {
         assert_eq!((launcher.selected, launcher.first), (0, 0));
     }
 
-    #[test]
-    fn home_lists_the_pages_matching_the_search() {
+    fn titles(launcher: &Launcher) -> Vec<String> {
+        items(launcher).into_iter().map(|item| item.title).collect()
+    }
+
+    fn app(id: &str, name: &str, description: &str) -> App {
+        apps::parse(id, &format!("[Desktop Entry]\nType=Application\nName={name}\nComment={description}\nExec={}\n", id.trim_end_matches(".desktop"))).unwrap()
+    }
+
+    fn with_apps() -> Launcher {
         let mut launcher = Launcher::new();
-        let titles = |launcher: &Launcher| items(launcher).into_iter().map(|item| item.title).collect::<Vec<_>>();
-        assert_eq!(titles(&launcher), ["Files", "Clipboard", "Keybinds", "Calculator"]);
-        launcher.set_query(String::from("CALC"));
-        assert_eq!(titles(&launcher), ["Calculator"]);
-        launcher.set_query(String::from("history"));
-        assert_eq!(titles(&launcher), ["Clipboard"]);
+        launcher.apps = vec![
+            app("firefox.desktop", "Firefox", "Browse the Web"),
+            app("kitty.desktop", "Kitty", "Fast, GPU-based terminal"),
+            app("org.gnome.Nautilus.desktop", "Files", "Access and organize files"),
+        ];
+        launcher.now = 1_000_000;
+        launcher
+    }
+
+    #[test]
+    fn home_lists_apps_then_pages_then_commands() {
+        assert_eq!(
+            titles(&with_apps()),
+            ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
+        );
+        let items = items(&with_apps());
+        assert_eq!((items[0].tag, &items[0].action), ("APPLICATION", &Action::App(0)));
+        assert_eq!((items[3].tag, &items[3].action), ("PAGE", &Action::Open(Page::Files)));
+        assert_eq!((items[11].tag, &items[11].action), ("COMMAND", &Action::Power(Power::Shutdown)));
+    }
+
+    #[test]
+    fn launched_apps_come_first_when_the_search_is_empty() {
+        let mut launcher = with_apps();
+        apps::bump(&mut launcher.scores, "kitty.desktop", launcher.now);
+        assert_eq!(titles(&launcher)[..3], ["Kitty", "Firefox", "Files"]);
+    }
+
+    #[test]
+    fn the_search_matches_names_ids_and_descriptions_fuzzily() {
+        let mut launcher = with_apps();
+        launcher.set_query(String::from("ffx"));
+        assert_eq!(titles(&launcher), ["Firefox"]);
+        launcher.set_query(String::from("nautilus"));
+        assert_eq!(titles(&launcher), ["Files"]);
+        launcher.set_query(String::from("gpu term"));
+        assert_eq!(titles(&launcher), ["Kitty"]);
         launcher.set_query(String::from("calc"));
-        let calculator = &items(&launcher)[0];
-        assert_eq!((calculator.tag, &calculator.action), ("PAGE", &Action::Open(Page::Calculator)));
+        assert_eq!(titles(&launcher), ["Calculator"]);
+        launcher.set_query(String::from("HISTORY"));
+        assert_eq!(titles(&launcher), ["Clipboard"]);
+    }
+
+    #[test]
+    fn launch_scores_break_ties_between_matches() {
+        let mut launcher = with_apps();
+        launcher.apps.push(app("firefox-dev.desktop", "Firefox", "Developer Edition"));
+        apps::bump(&mut launcher.scores, "firefox-dev.desktop", launcher.now);
+        launcher.set_query(String::from("firefox"));
+        let items = items(&launcher);
+        assert_eq!(items[0].action, Action::App(3));
+    }
+
+    #[test]
+    fn apps_with_an_open_window_are_marked() {
+        let mut launcher = with_apps();
+        launcher.running = vec![String::from("kitty")];
+        let running: Vec<bool> = items(&launcher).iter().take(3).map(|item| item.running).collect();
+        assert_eq!(running, [false, true, false]);
+    }
+
+    #[test]
+    fn session_commands_ask_for_a_second_enter() {
+        let mut launcher = with_apps();
+        assert!(launcher.confirm(Power::Lock));
+        assert!(!launcher.confirm(Power::Shutdown));
+        let shutdown = items(&launcher).into_iter().find(|item| item.action == Action::Power(Power::Shutdown)).unwrap();
+        assert_eq!(shutdown.tag, "CONFIRM ↵");
+        assert!(launcher.confirm(Power::Shutdown));
+        // Moving away cancels it.
+        assert!(!launcher.confirm(Power::Restart));
+        launcher.move_selection(1, 12);
+        assert!(!launcher.confirm(Power::Restart));
+        launcher.set_query(String::from("r"));
+        assert!(!launcher.confirm(Power::Restart));
     }
 
     #[test]
