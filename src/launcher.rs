@@ -8,7 +8,7 @@ use iced::{Alignment, Border, Color, Element, Font, Length, Padding, mouse};
 
 use crate::apps::{self, App, Score};
 use crate::keybinds::Keybind;
-use crate::{calc, fuzzy, tray};
+use crate::{calc, files, fuzzy, tray};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
@@ -22,6 +22,10 @@ const APP_ICON: f32 = 22.0;
 const CARD_HEIGHT: f32 = 120.0;
 // List rows the calculator's result card takes the place of.
 const CARD_ROWS: usize = 3;
+// Width of the list beside a preview, and the preview's box and detail rows.
+const PREVIEW_LIST_WIDTH: f32 = 300.0;
+const PREVIEW_HEIGHT: f32 = 150.0;
+const DETAIL_HEIGHT: f32 = 30.0;
 // Open-window marker, the green of the media player's source tag.
 const RUNNING: Color = Color::from_rgb8(0x5f, 0xe3, 0x9a);
 pub const WIDTH: u32 = 720;
@@ -165,6 +169,8 @@ pub enum Action {
     /// Index into `Launcher::apps`.
     App(usize),
     Power(Power),
+    /// Open it, or with Ctrl+Enter put its path in the search.
+    File(files::Entry),
 }
 
 #[derive(Clone, Debug)]
@@ -234,8 +240,89 @@ pub fn items(launcher: &Launcher) -> Vec<Item> {
         Page::Home => home_items(launcher),
         Page::Keybinds => keybind_items(launcher),
         Page::Calculator => history_items(launcher),
-        Page::Files | Page::Clipboard => Vec::new(),
+        Page::Files => file_items(launcher),
+        Page::Clipboard => Vec::new(),
     }
+}
+
+/// Recent folders, or recent and found entries matching the search, best first.
+fn file_items(launcher: &Launcher) -> Vec<Item> {
+    files::rank(&launcher.query, &launcher.recent, &launcher.found, &launcher.home)
+        .into_iter()
+        .map(|entry| Item {
+            icon: ItemIcon::Symbol(if entry.is_dir { "folder" } else { "description" }),
+            title: entry.name.clone(),
+            title_style: TitleStyle::Body,
+            description: String::new(),
+            tag: String::new(),
+            running: false,
+            action: Action::File(entry),
+        })
+        .collect()
+}
+
+/// The entry the Files preview shows.
+pub fn selected_file(launcher: &Launcher) -> Option<files::Entry> {
+    match items(launcher).into_iter().nth(launcher.selected)?.action {
+        Action::File(entry) => Some(entry),
+        _ => None,
+    }
+}
+
+/// Pages that show the selected row beside the list.
+pub fn has_preview(page: Page) -> bool {
+    page == Page::Files
+}
+
+/// Key/value rows under the Files preview; `…` while the details load.
+fn preview_rows(launcher: &Launcher, entry: &files::Entry) -> Vec<(&'static str, String)> {
+    let details = launcher.details(&entry.path);
+    let pending = || String::from("…");
+    vec![
+        ("NAME", entry.name.clone()),
+        ("TYPE", details.map_or_else(pending, |details| details.mime.clone())),
+        ("SIZE", details.map_or_else(pending, |details| files::format_size(details.size))),
+        ("PATH", files::tilde(&entry.path, &launcher.home)),
+        ("ITEMS", details.map_or_else(pending, |details| details.items.map_or_else(|| String::from("—"), |items| items.to_string()))),
+    ]
+}
+
+/// The Files preview: folder icon, or the start of a readable file, and the entry's details.
+fn file_preview<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Element<'a, Message> {
+    let Some(entry) = selected_file(launcher) else {
+        return preview_pane(theme, Space::new().into(), Vec::new());
+    };
+    let text_preview = launcher.details(&entry.path).and_then(|details| details.preview.as_deref());
+    let content: Element<'a, Message> = match (entry.is_dir, text_preview) {
+        (false, Some(preview)) => container(text(preview).font(Font::MONOSPACE).size(11).color(theme.text_muted).wrapping(text::Wrapping::None))
+            .padding(10)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .clip(true)
+            .into(),
+        (true, _) => container(icon_colored("folder", 64.0, theme.accent)).center(Length::Fill).into(),
+        (false, None) => container(icon_colored("description", 64.0, theme.text_dim)).center(Length::Fill).into(),
+    };
+    preview_pane(theme, content, preview_rows(launcher, &entry))
+}
+
+/// A large box with `content`, then key/value rows each over a divider; shared by the pages
+/// that preview their selected row.
+fn preview_pane<'a>(theme: crate::theme::Theme, content: Element<'a, Message>, rows: Vec<(&'static str, String)>) -> Element<'a, Message> {
+    let preview = container(content).width(Length::Fill).height(PREVIEW_HEIGHT).style(move |_| container::Style {
+        background: Some(theme.section_background.into()),
+        border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+    let rows = rows.into_iter().map(|(key, value)| {
+        let value = container(text(value).font(BODY_BOLD).size(13).color(theme.text).wrapping(text::Wrapping::None)).width(Length::Fill).align_right(Length::Fill).clip(true);
+        column![
+            row![text(key).font(CONDENSED_BOLD).size(12).color(theme.text_muted), value].spacing(16).height(DETAIL_HEIGHT).align_y(Alignment::Center),
+            line(theme.border),
+        ]
+        .into()
+    });
+    column![preview, Column::with_children(rows)].spacing(10).padding(16).width(Length::Fill).height(Length::Fill).into()
 }
 
 /// Past calculations, or those matching the search by input or result, best first.
@@ -343,6 +430,7 @@ pub fn section(launcher: &Launcher, count: usize) -> String {
     match (launcher.page(), launcher.query.is_empty()) {
         (Page::Home, true) => String::from("SUGGESTIONS"),
         (Page::Keybinds, true) => String::from("KEYBINDS"),
+        (Page::Files, true) => String::from("RECENT FOLDERS (ZOXIDE)"),
         (Page::Calculator, _) => String::from("HISTORY"),
         _ => format!("RESULTS ({count})"),
     }
@@ -354,7 +442,8 @@ pub fn hints(page: Page) -> &'static [(&'static str, &'static str)] {
         Page::Home => &[("↵", "open"), ("^↵", "action"), ("^1–9", "pick"), ("ESC", "close")],
         Page::Keybinds => &[("↑↓", "move"), ("⇧ESC", "back"), ("ESC", "close")],
         Page::Calculator => &[("↵", "copy"), ("^↵", "reuse"), ("TAB", "history"), ("⇧ESC", "back")],
-        Page::Files | Page::Clipboard => &[("↵", "open"), ("⇧ESC", "back"), ("ESC", "close")],
+        Page::Files => &[("↵", "open"), ("^↵", "path"), ("⇧ESC", "back")],
+        Page::Clipboard => &[("↵", "open"), ("⇧ESC", "back"), ("ESC", "close")],
     }
 }
 
@@ -424,6 +513,10 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     };
     let body: Element<'_, Message> = match launcher.answer().filter(|_| page == Page::Calculator) {
         Some(answer) => column![answer_card(theme, answer), header, list].height(Length::Fill).into(),
+        None if has_preview(page) => {
+            let divider = container(Space::new()).width(1).height(Length::Fill).style(move |_| container::background(theme.border));
+            row![column![header, list].width(PREVIEW_LIST_WIDTH).height(Length::Fill), divider, file_preview(theme, launcher)].height(Length::Fill).into()
+        }
         None => column![header, list].height(Length::Fill).into(),
     };
 
@@ -557,6 +650,14 @@ pub struct Launcher {
     pub now: i64,
     /// Command waiting for a second Enter.
     confirm: Option<Power>,
+    /// Home folder, for `~` in searches and paths.
+    pub home: String,
+    /// Folders from zoxide, best first, read when the Files page opens.
+    pub recent: Vec<files::Entry>,
+    /// Latest fd results that were for the search shown.
+    found: Vec<files::Entry>,
+    /// Details of previewed entries by path.
+    file_details: HashMap<String, files::Details>,
 }
 
 impl Launcher {
@@ -575,12 +676,17 @@ impl Launcher {
             running: Vec::new(),
             now: 0,
             confirm: None,
+            home: String::new(),
+            recent: Vec::new(),
+            found: Vec::new(),
+            file_details: HashMap::new(),
         }
     }
 
-    /// With the saved launch scores and calculator history.
+    /// With the saved launch scores, calculator history and home folder.
     pub fn load() -> Self {
-        Self { scores: apps::load_scores(), history: calc::load_history(), ..Self::new() }
+        let home = std::env::var("HOME").unwrap_or_default();
+        Self { scores: apps::load_scores(), history: calc::load_history(), home, ..Self::new() }
     }
 
     /// The calculator's answer, if it is for the current search.
@@ -593,6 +699,25 @@ impl Launcher {
         if query == self.query {
             self.answer = answer.map(|answer| (query, answer));
         }
+    }
+
+    /// Stores fd's results for `query`, dropping results to older searches that arrive late.
+    /// Kept while the next search runs, so typing re-ranks them instead of emptying the list.
+    pub fn set_found(&mut self, query: String, found: Vec<files::Entry>) {
+        if query == self.query {
+            self.found = found;
+        }
+    }
+
+    pub fn set_details(&mut self, path: String, details: files::Details) {
+        if self.file_details.len() >= files::LIMIT {
+            self.file_details.clear();
+        }
+        self.file_details.insert(path, details);
+    }
+
+    pub fn details(&self, path: &str) -> Option<&files::Details> {
+        self.file_details.get(path)
     }
 
     /// Rows that fit under the search, fewer under the calculator's result card.
@@ -624,6 +749,10 @@ impl Launcher {
     }
 
     pub fn open(&mut self, page: Page) {
+        if page == Page::Files {
+            self.found.clear();
+            self.file_details.clear();
+        }
         self.stack.push(page);
         self.set_query(String::new());
     }
@@ -935,6 +1064,60 @@ mod tests {
         assert_eq!(calculator_enter(&launcher), CalcEnter::Recall(String::from("4 * 22 + 1")));
         launcher.set_query(String::from("zzz"));
         assert_eq!(calculator_enter(&launcher), CalcEnter::Nothing);
+    }
+
+    fn files() -> Launcher {
+        let mut launcher = Launcher::new();
+        launcher.home = String::from("/home/user");
+        launcher.recent = vec![files::Entry::new("/home/user/code/zehll", true, 90.0), files::Entry::new("/home/user/Downloads", true, 40.0)];
+        launcher.open(Page::Files);
+        launcher
+    }
+
+    #[test]
+    fn the_files_page_lists_recent_folders_then_search_results() {
+        let mut launcher = files();
+        assert_eq!((section(&launcher, 2).as_str(), titles(&launcher)), ("RECENT FOLDERS (ZOXIDE)", vec![String::from("zehll"), String::from("Downloads")]));
+        let first = &items(&launcher)[0];
+        assert_eq!((first.title_style, &first.action), (TitleStyle::Body, &Action::File(launcher.recent[0].clone())));
+        assert!(matches!(first.icon, ItemIcon::Symbol("folder")));
+        assert_eq!(selected_file(&launcher), Some(launcher.recent[0].clone()));
+        launcher.set_query(String::from("notes"));
+        launcher.set_found(String::from("notes"), vec![files::Entry::new("/home/user/notes.md", false, 0.0)]);
+        assert_eq!(titles(&launcher), ["notes.md"]);
+        assert!(matches!(items(&launcher)[0].icon, ItemIcon::Symbol("description")));
+        assert_eq!(section(&launcher, 1), "RESULTS (1)");
+        launcher.set_query(String::from("zzzz"));
+        assert!(items(&launcher).is_empty());
+        assert_eq!(empty_text(Page::Files), "NO RESULTS");
+        assert_eq!(hints(Page::Files), [("↵", "open"), ("^↵", "path"), ("⇧ESC", "back")]);
+        assert!(has_preview(Page::Files) && !has_preview(Page::Home));
+    }
+
+    #[test]
+    fn search_results_for_an_older_search_are_dropped() {
+        let mut launcher = files();
+        launcher.set_query(String::from("notes"));
+        launcher.set_found(String::from("note"), vec![files::Entry::new("/home/user/notes.txt", false, 0.0)]);
+        assert_eq!(titles(&launcher), Vec::<String>::new());
+        launcher.set_found(String::from("notes"), vec![files::Entry::new("/home/user/notes.md", false, 0.0)]);
+        // fd runs per search, so an older one can finish last.
+        launcher.set_found(String::from("note"), vec![files::Entry::new("/home/user/notes.txt", false, 0.0)]);
+        assert_eq!(titles(&launcher), ["notes.md"]);
+    }
+
+    #[test]
+    fn file_details_are_kept_by_path() {
+        let mut launcher = files();
+        let details = files::Details { mime: String::from("inode/directory"), size: 4096, items: Some(21), preview: None };
+        launcher.set_details(String::from("/home/user/code/zehll"), details.clone());
+        assert_eq!(launcher.details("/home/user/code/zehll"), Some(&details));
+        assert_eq!(launcher.details("/home/user/Downloads"), None);
+        assert_eq!(
+            preview_rows(&launcher, &launcher.recent[0]),
+            [("NAME", "zehll"), ("TYPE", "inode/directory"), ("SIZE", "4.0 KB"), ("PATH", "~/code/zehll"), ("ITEMS", "21")].map(|(k, v)| (k, v.to_string()))
+        );
+        assert_eq!(preview_rows(&launcher, &launcher.recent[1])[1], ("TYPE", String::from("…")));
     }
 
     #[test]

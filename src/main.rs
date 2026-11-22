@@ -9,6 +9,7 @@ mod clipboard;
 mod calendar;
 mod cava;
 mod dbus;
+mod files;
 mod flame;
 mod flashbang;
 mod fuzzy;
@@ -61,6 +62,8 @@ const BAR_PADDING: u16 = 16;
 const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 // calendarz's poll interval.
 const MEETINGS_POLL: Duration = Duration::from_secs(120);
+// Pause in typing before the Files page runs fd.
+const FILES_DEBOUNCE: Duration = Duration::from_millis(150);
 const PILL_BACKGROUND: Color = Color::from_rgb8(0x0d, 0x14, 0x30);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
@@ -436,6 +439,12 @@ enum Message {
     CalcAnswer(String, Option<calc::Answer>),
     // Rows to scroll and the list length.
     LauncherScroll(i32, usize),
+    FilesRecent(Vec<files::Entry>),
+    // A search whose debounce ended; it runs only if it is still the one shown.
+    FilesSearch(String),
+    // fd's results and the search they were computed for.
+    FilesFound(String, Vec<files::Entry>),
+    FileDetails(String, Option<files::Details>),
 }
 
 fn namespace() -> String {
@@ -866,7 +875,10 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                         return close_launcher(bar);
                     }
                 }
-                launcher::Nav::Move(delta) => bar.launcher.move_selection(delta, len),
+                launcher::Nav::Move(delta) => {
+                    bar.launcher.move_selection(delta, len);
+                    return Task::batch([load_file_details(bar), focus_launcher()]);
+                }
                 launcher::Nav::Activate { secondary } if bar.launcher.page() == launcher::Page::Calculator => {
                     return calculator_enter(bar, secondary);
                 }
@@ -880,6 +892,22 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::LauncherActivate(index) => return activate_launcher_item(bar, index, false),
         Message::LauncherApps(apps) => bar.launcher.apps = apps,
         Message::LauncherScroll(rows, len) => bar.launcher.scroll(rows, len),
+        Message::FilesRecent(recent) => {
+            bar.launcher.recent = recent;
+            return load_file_details(bar);
+        }
+        Message::FilesSearch(query) => {
+            if query == bar.launcher.query && bar.launcher.page() == launcher::Page::Files {
+                let home = bar.launcher.home.clone();
+                return Task::perform(files::search(query.clone(), home), move |found| Message::FilesFound(query.clone(), found));
+            }
+        }
+        Message::FilesFound(query, found) => {
+            bar.launcher.set_found(query, found);
+            return load_file_details(bar);
+        }
+        Message::FileDetails(path, Some(details)) => bar.launcher.set_details(path, details),
+        Message::FileDetails(_, None) => {}
         Message::Media(command) => {
             if let Some(player) = bar.media.clone() {
                 return Task::future(mpris::run(player, command)).discard();
@@ -1442,7 +1470,10 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
                 bar.launcher.keybinds = keybinds::load();
             }
             bar.launcher.open(page);
-            focus_launcher()
+            match page {
+                launcher::Page::Files => Task::batch([Task::perform(files::recent(), Message::FilesRecent), focus_launcher()]),
+                _ => focus_launcher(),
+            }
         }
         launcher::Action::App(index) => {
             let Some(app) = bar.launcher.apps.get(index).cloned() else {
@@ -1466,16 +1497,45 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
             }
             close_launcher(bar)
         }
+        launcher::Action::File(entry) if secondary => Task::batch([set_launcher_query(bar, files::path_text(&entry)), focus_launcher()]),
+        launcher::Action::File(entry) => {
+            if !hyprland::exec(&format!("xdg-open {}", files::shell_quote(&entry.path))) {
+                eprintln!("zehll: cannot open {}", entry.path);
+            }
+            close_launcher(bar)
+        }
     }
 }
 
-/// Sets the launcher search; on the Calculator page qalc evaluates it.
+/// Sets the launcher search; on the Calculator page qalc evaluates it, on the Files page fd
+/// searches it once typing pauses.
 fn set_launcher_query(bar: &mut Bar, query: String) -> Task<Message> {
     bar.launcher.set_query(query.clone());
-    if bar.launcher.page() != launcher::Page::Calculator || query.trim().is_empty() {
+    if query.trim().is_empty() {
+        return load_file_details(bar);
+    }
+    match bar.launcher.page() {
+        launcher::Page::Calculator => Task::perform(calc::evaluate(query.clone()), move |answer| Message::CalcAnswer(query.clone(), answer)),
+        launcher::Page::Files => Task::batch([
+            load_file_details(bar),
+            Task::perform(tokio::time::sleep(FILES_DEBOUNCE), move |()| Message::FilesSearch(query.clone())),
+        ]),
+        _ => Task::none(),
+    }
+}
+
+/// Reads the details of the Files entry shown in the preview, unless they are known.
+fn load_file_details(bar: &Bar) -> Task<Message> {
+    if bar.launcher.page() != launcher::Page::Files {
         return Task::none();
     }
-    Task::perform(calc::evaluate(query.clone()), move |answer| Message::CalcAnswer(query.clone(), answer))
+    match launcher::selected_file(&bar.launcher) {
+        Some(entry) if bar.launcher.details(&entry.path).is_none() => {
+            let path = entry.path;
+            Task::perform(files::details(path.clone()), move |details| Message::FileDetails(path.clone(), details))
+        }
+        _ => Task::none(),
+    }
 }
 
 /// Enter copies the answer and remembers it, or recalls the picked past calculation;
