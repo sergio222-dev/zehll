@@ -12,6 +12,7 @@ mod flashbang;
 mod fuzzy;
 mod hyprland;
 mod idle;
+mod keybinds;
 mod launcher;
 mod media;
 mod meetings;
@@ -1423,7 +1424,11 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
         return focus_launcher();
     };
     match item.action {
+        launcher::Action::None => focus_launcher(),
         launcher::Action::Open(page) => {
+            if page == launcher::Page::Keybinds {
+                bar.launcher.keybinds = keybinds::load();
+            }
             bar.launcher.open(page);
             focus_launcher()
         }

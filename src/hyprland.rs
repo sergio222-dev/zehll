@@ -52,6 +52,11 @@ pub fn exit() -> bool {
     dispatch("hl.dsp.exit()", "exit")
 }
 
+/// Every keybinding (`hyprctl binds -j`).
+pub fn binds() -> Option<serde_json::Value> {
+    request("j/binds")
+}
+
 /// Open windows as (address, class).
 pub fn clients() -> Vec<(String, String)> {
     let Some(serde_json::Value::Array(clients)) = request("j/clients") else {

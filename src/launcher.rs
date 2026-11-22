@@ -7,6 +7,7 @@ use iced::widget::{self, Column, Row, Space, Stack, button, column, container, i
 use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
 
 use crate::apps::{self, App, Score};
+use crate::keybinds::Keybind;
 use crate::{fuzzy, tray};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
@@ -153,6 +154,8 @@ impl Power {
 /// What a launcher row does when activated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    /// Rows only shown, like keybindings.
+    None,
     Open(Page),
     /// Index into `Launcher::apps`.
     App(usize),
@@ -166,13 +169,23 @@ pub enum ItemIcon {
     App(Option<tray::Icon>),
 }
 
+/// Font of a row title.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitleStyle {
+    Body,
+    /// Key combinations, in condensed capitals.
+    Keys,
+}
+
 /// One row of the launcher list.
 #[derive(Clone, Debug)]
 pub struct Item {
     pub icon: ItemIcon,
     pub title: String,
+    pub title_style: TitleStyle,
     pub description: String,
-    pub tag: &'static str,
+    /// Right-aligned label: the kind of row, or a keybinding's description.
+    pub tag: String,
     /// An app with an open window.
     pub running: bool,
     pub action: Action,
@@ -183,8 +196,32 @@ pub struct Item {
 pub fn items(launcher: &Launcher) -> Vec<Item> {
     match launcher.page() {
         Page::Home => home_items(launcher),
-        Page::Files | Page::Clipboard | Page::Keybinds | Page::Calculator => Vec::new(),
+        Page::Keybinds => keybind_items(launcher),
+        Page::Files | Page::Clipboard | Page::Calculator => Vec::new(),
     }
+}
+
+/// Every described keybinding, or those matching the search by keys or description, best first.
+fn keybind_items(launcher: &Launcher) -> Vec<Item> {
+    let mut ranked: Vec<(f32, Item)> = launcher
+        .keybinds
+        .iter()
+        .filter_map(|bind| {
+            let score = [&bind.keys, &bind.description].iter().filter_map(|field| fuzzy::score(&launcher.query, field)).reduce(f32::max)?;
+            let item = Item {
+                icon: ItemIcon::Symbol("keyboard"),
+                title: bind.keys.clone(),
+                title_style: TitleStyle::Keys,
+                description: String::new(),
+                tag: bind.description.clone(),
+                running: false,
+                action: Action::None,
+            };
+            Some((score, item))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.into_iter().map(|(_, item)| item).collect()
 }
 
 fn home_items(launcher: &Launcher) -> Vec<Item> {
@@ -199,8 +236,9 @@ fn home_items(launcher: &Launcher) -> Vec<Item> {
         let item = Item {
             icon: ItemIcon::App(app.icon.clone()),
             title: app.name.clone(),
+            title_style: TitleStyle::Body,
             description: app.description.clone(),
-            tag: "APPLICATION",
+            tag: String::from("APPLICATION"),
             running: launcher.running.iter().any(|class| apps::owns_window(app, class)),
             action: Action::App(index),
         };
@@ -211,8 +249,9 @@ fn home_items(launcher: &Launcher) -> Vec<Item> {
             let item = Item {
                 icon: ItemIcon::Symbol(page.icon()),
                 title: page.title().to_string(),
+                title_style: TitleStyle::Body,
                 description: page.description().to_string(),
-                tag: "PAGE",
+                tag: String::from("PAGE"),
                 running: false,
                 action: Action::Open(page),
             };
@@ -224,8 +263,9 @@ fn home_items(launcher: &Launcher) -> Vec<Item> {
             let item = Item {
                 icon: ItemIcon::Symbol(power.icon()),
                 title: power.title().to_string(),
+                title_style: TitleStyle::Body,
                 description: power.description().to_string(),
-                tag: if launcher.confirm == Some(power) { "CONFIRM ↵" } else { "COMMAND" },
+                tag: String::from(if launcher.confirm == Some(power) { "CONFIRM ↵" } else { "COMMAND" }),
                 running: false,
                 action: Action::Power(power),
             };
@@ -241,6 +281,7 @@ fn home_items(launcher: &Launcher) -> Vec<Item> {
 pub fn section(launcher: &Launcher, count: usize) -> String {
     match (launcher.page(), launcher.query.is_empty()) {
         (Page::Home, true) => String::from("SUGGESTIONS"),
+        (Page::Keybinds, true) => String::from("KEYBINDS"),
         _ => format!("RESULTS ({count})"),
     }
 }
@@ -249,7 +290,8 @@ pub fn section(launcher: &Launcher, count: usize) -> String {
 pub fn hints(page: Page) -> &'static [(&'static str, &'static str)] {
     match page {
         Page::Home => &[("↵", "open"), ("^↵", "action"), ("^1–9", "pick"), ("ESC", "close")],
-        Page::Files | Page::Clipboard | Page::Keybinds | Page::Calculator => &[("↵", "open"), ("⇧ESC", "back"), ("ESC", "close")],
+        Page::Keybinds => &[("↑↓", "move"), ("⇧ESC", "back"), ("ESC", "close")],
+        Page::Files | Page::Clipboard | Page::Calculator => &[("↵", "open"), ("⇧ESC", "back"), ("ESC", "close")],
     }
 }
 
@@ -353,11 +395,19 @@ fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: 
     let icon = column![container(icon).center_x(26).height(APP_ICON), running].spacing(1).align_x(Alignment::Center);
     let content = row![
         icon,
-        text(item.title).font(BODY_BOLD).size(15).wrapping(text::Wrapping::None),
+        match item.title_style {
+            TitleStyle::Body => text(item.title).font(BODY_BOLD).size(15),
+            TitleStyle::Keys => text(item.title).font(CONDENSED_BOLD).size(16),
+        }
+        .wrapping(text::Wrapping::None),
         container(text(item.description).font(BODY_FONT).size(12).color(theme.text_muted).wrapping(text::Wrapping::None))
             .width(Length::Fill)
             .clip(true),
-        text(item.tag).font(CONDENSED_BOLD).size(12).color(theme.text_muted),
+        match item.title_style {
+            // A keybinding's description reads as text, not as a label.
+            TitleStyle::Keys => text(item.tag).font(BODY_FONT).size(13).color(theme.text_muted),
+            TitleStyle::Body => text(item.tag).font(CONDENSED_BOLD).size(12).color(theme.text_muted),
+        },
     ]
     .spacing(12)
     .align_y(Alignment::Center);
@@ -397,6 +447,8 @@ pub struct Launcher {
     pub apps: Vec<App>,
     /// Launch scores by desktop id.
     pub scores: HashMap<String, Score>,
+    /// Described Hyprland binds, read when the Keybinds page opens.
+    pub keybinds: Vec<Keybind>,
     /// Classes of the open windows, read when the launcher opens.
     pub running: Vec<String>,
     /// Unix seconds when the launcher opened, for decaying launch scores.
@@ -414,6 +466,7 @@ impl Launcher {
             first: 0,
             apps: Vec::new(),
             scores: HashMap::new(),
+            keybinds: Vec::new(),
             running: Vec::new(),
             now: 0,
             confirm: None,
@@ -617,9 +670,9 @@ mod tests {
             ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
         );
         let items = items(&with_apps());
-        assert_eq!((items[0].tag, &items[0].action), ("APPLICATION", &Action::App(0)));
-        assert_eq!((items[3].tag, &items[3].action), ("PAGE", &Action::Open(Page::Files)));
-        assert_eq!((items[11].tag, &items[11].action), ("COMMAND", &Action::Power(Power::Shutdown)));
+        assert_eq!((items[0].tag.as_str(), &items[0].action), ("APPLICATION", &Action::App(0)));
+        assert_eq!((items[3].tag.as_str(), &items[3].action), ("PAGE", &Action::Open(Page::Files)));
+        assert_eq!((items[11].tag.as_str(), &items[11].action), ("COMMAND", &Action::Power(Power::Shutdown)));
     }
 
     #[test]
@@ -676,6 +729,26 @@ mod tests {
         assert!(!launcher.confirm(Power::Restart));
         launcher.set_query(String::from("r"));
         assert!(!launcher.confirm(Power::Restart));
+    }
+
+    #[test]
+    fn the_keybinds_page_matches_keys_and_descriptions() {
+        let mut launcher = Launcher::new();
+        launcher.keybinds = vec![
+            Keybind { keys: String::from("SUPER + RETURN"), description: String::from("Launch terminal") },
+            Keybind { keys: String::from("SUPER + SPACE"), description: String::from("Toggle launcher") },
+            Keybind { keys: String::from("SUPER + V"), description: String::from("Open clipboard manager") },
+        ];
+        launcher.open(Page::Keybinds);
+        assert_eq!(section(&launcher, 3), "KEYBINDS");
+        assert_eq!(titles(&launcher), ["SUPER + RETURN", "SUPER + SPACE", "SUPER + V"]);
+        let first = &items(&launcher)[0];
+        assert_eq!((first.tag.as_str(), &first.action, first.title_style), ("Launch terminal", &Action::None, TitleStyle::Keys));
+        launcher.set_query(String::from("clipboard"));
+        assert_eq!(titles(&launcher), ["SUPER + V"]);
+        launcher.set_query(String::from("super space"));
+        assert_eq!(titles(&launcher), ["SUPER + SPACE"]);
+        assert_eq!(section(&launcher, 1), "RESULTS (1)");
     }
 
     #[test]
