@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use iced::futures::{SinkExt, Stream};
 use iced::stream;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader, Lines};
 use tokio::net::UnixStream;
 
 #[derive(Debug, Clone, Default)]
@@ -92,22 +92,27 @@ pub fn active_window() -> Option<ActiveWindow> {
     })
 }
 
+/// Lines of the Hyprland event socket (`EVENT>>DATA`).
+async fn event_lines() -> Option<Lines<BufReader<UnixStream>>> {
+    let Some(path) = socket_dir().map(|dir| dir.join(".socket2.sock")) else {
+        eprintln!("zehll: not running under Hyprland");
+        return None;
+    };
+    match UnixStream::connect(&path).await {
+        Ok(socket) => Some(BufReader::new(socket).lines()),
+        Err(err) => {
+            eprintln!("zehll: cannot connect to {}: {err}", path.display());
+            None
+        }
+    }
+}
+
 /// Streams focus and title changes from the Hyprland event socket.
 pub fn active_window_events() -> impl Stream<Item = ActiveWindow> {
     stream::channel(16, async |mut output| {
-        let Some(path) = socket_dir().map(|dir| dir.join(".socket2.sock")) else {
-            eprintln!("zehll: not running under Hyprland");
+        let Some(mut lines) = event_lines().await else {
             return;
         };
-        let socket = match UnixStream::connect(&path).await {
-            Ok(socket) => socket,
-            Err(err) => {
-                eprintln!("zehll: cannot connect to {}: {err}", path.display());
-                return;
-            }
-        };
-
-        let mut lines = BufReader::new(socket).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             // Format: activewindow>>CLASS,TITLE (the title may contain commas).
             let Some(data) = line.strip_prefix("activewindow>>") else {
@@ -120,6 +125,69 @@ pub fn active_window_events() -> impl Stream<Item = ActiveWindow> {
             };
             if output.send(window).await.is_err() {
                 return;
+            }
+        }
+    })
+}
+
+/// A monitor and the id of the workspace it shows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Monitor {
+    pub name: String,
+    pub workspace: i64,
+}
+
+/// Every enabled monitor.
+pub fn monitors() -> Vec<Monitor> {
+    request("j/monitors").map(|json| parse_monitors(&json)).unwrap_or_default()
+}
+
+fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
+    let Some(monitors) = json.as_array() else {
+        return Vec::new();
+    };
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            Some(Monitor {
+                name: monitor["name"].as_str()?.to_owned(),
+                workspace: monitor["activeWorkspace"]["id"].as_i64()?,
+            })
+        })
+        .collect()
+}
+
+/// Whether an event socket line can change the monitors or the workspace one of them shows.
+fn changes_monitors(line: &str) -> bool {
+    let Some((event, _)) = line.split_once(">>") else {
+        return false;
+    };
+    matches!(
+        event.trim_end_matches("v2"),
+        "workspace" | "focusedmon" | "moveworkspace" | "monitoradded" | "monitorremoved"
+    )
+}
+
+/// Streams the monitors, once on connecting and again whenever they or their workspaces change.
+pub fn monitor_events() -> impl Stream<Item = Vec<Monitor>> {
+    stream::channel(16, async |mut output| {
+        let Some(mut lines) = event_lines().await else {
+            return;
+        };
+        let mut last = monitors();
+        if output.send(last.clone()).await.is_err() {
+            return;
+        }
+        while let Ok(Some(line)) = lines.next_line().await {
+            if !changes_monitors(&line) {
+                continue;
+            }
+            let current = monitors();
+            if current != last {
+                last = current;
+                if output.send(last.clone()).await.is_err() {
+                    return;
+                }
             }
         }
     })
@@ -153,5 +221,38 @@ mod tests {
     fn lua_strings_escape_quotes_backslashes_and_newlines() {
         assert_eq!(lua_string("kitty -e btop"), "\"kitty -e btop\"");
         assert_eq!(lua_string("sh -c \"echo a\\b\"\n"), "\"sh -c \\\"echo a\\\\b\\\"\\n\"");
+    }
+
+    #[test]
+    fn monitors_keep_their_name_and_active_workspace() {
+        let json = serde_json::json!([
+            { "id": 0, "name": "DP-1", "activeWorkspace": { "id": 2, "name": "2" }, "focused": false },
+            { "id": 1, "name": "HDMI-A-2", "activeWorkspace": { "id": 5, "name": "5" }, "focused": true },
+            { "id": 2, "name": "broken" },
+        ]);
+        assert_eq!(
+            parse_monitors(&json),
+            [
+                Monitor { name: "DP-1".into(), workspace: 2 },
+                Monitor { name: "HDMI-A-2".into(), workspace: 5 },
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_and_monitor_events_refresh_the_monitors() {
+        for line in [
+            "workspacev2>>6,6",
+            "workspace>>6",
+            "focusedmonv2>>DP-1,2",
+            "moveworkspacev2>>3,3,HDMI-A-2",
+            "monitoraddedv2>>2,DP-2,Dell",
+            "monitorremovedv2>>2,DP-2,Dell",
+        ] {
+            assert!(changes_monitors(line), "{line}");
+        }
+        for line in ["activewindow>>kitty,workspacev2>>1", "openwindow>>1,2,kitty,x", "workspacev"] {
+            assert!(!changes_monitors(line), "{line}");
+        }
     }
 }

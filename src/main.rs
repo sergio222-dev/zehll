@@ -36,6 +36,7 @@ mod system;
 mod theme;
 mod todo;
 mod tray;
+mod workspaces;
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -64,6 +65,8 @@ const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 const MEETINGS_POLL: Duration = Duration::from_secs(120);
 // Pause in typing before the Files page runs fd.
 const FILES_DEBOUNCE: Duration = Duration::from_millis(150);
+// Wait before opening the bar of a monitor plugged in while Zehll runs (see `set_monitors`).
+const NEW_MONITOR_DELAY: Duration = Duration::from_millis(500);
 const PILL_BACKGROUND: Color = Color::from_rgb8(0x0d, 0x14, 0x30);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
@@ -88,13 +91,9 @@ pub fn main() -> Result<(), iced_layershell::Error> {
         .style(style)
         .subscription(subscription)
         .settings(Settings {
-            layer_settings: LayerShellSettings {
-                size: Some((0, BAR_HEIGHT)),
-                exclusive_zone: BAR_HEIGHT as i32,
-                anchor: Anchor::Top | Anchor::Left | Anchor::Right,
-                start_mode: StartMode::AllScreens,
-                ..Default::default()
-            },
+            // No surface at start: Zehll opens one bar per Hyprland monitor (see `bar_settings`),
+            // since an `AllScreens` surface does not say which monitor it is on.
+            layer_settings: LayerShellSettings { start_mode: StartMode::Background, ..Default::default() },
             fonts: vec![
                 Cow::Borrowed(include_bytes!("../assets/fonts/Barlow-Regular.ttf").as_slice()),
                 Cow::Borrowed(include_bytes!("../assets/fonts/Barlow-Medium.ttf").as_slice()),
@@ -112,6 +111,11 @@ pub fn main() -> Result<(), iced_layershell::Error> {
 
 struct Bar {
     theme: theme::Theme,
+    // Bar surfaces and the monitor each is on.
+    bars: HashMap<Id, String>,
+    monitors: Vec<hyprland::Monitor>,
+    // Workspace indicator of each monitor, by name.
+    workspaces: HashMap<String, workspaces::Indicator>,
     theme_modified: Option<SystemTime>,
     window: hyprland::ActiveWindow,
     now: DateTime<Local>,
@@ -241,6 +245,9 @@ impl Bar {
         let state = state::State::load();
         let bar = Self {
             theme: theme::Theme::load(),
+            bars: HashMap::new(),
+            monitors: Vec::new(),
+            workspaces: HashMap::new(),
             theme_modified: theme::modified(),
             window: hyprland::active_window().unwrap_or_default(),
             now: Local::now(),
@@ -430,6 +437,11 @@ enum Message {
     MediaFrame,
     ReleaseMediaSeek,
     WindowOpened(Id),
+    Monitors(Vec<hyprland::Monitor>),
+    // Opens the bar of a monitor unless it is gone or already has one.
+    OpenBar(String),
+    // Redraws the workspace indicators while one is moving.
+    WorkspaceFrame,
     ToggleLauncher,
     LauncherQuery(String),
     LauncherNav(launcher::Nav),
@@ -505,6 +517,10 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         ]),
         false => Subscription::none(),
     };
+    let workspace_move = match bar.workspaces.values().any(|indicator| indicator.animating(Instant::now())) {
+        true => time::every(Duration::from_millis(16)).map(|_| Message::WorkspaceFrame),
+        false => Subscription::none(),
+    };
     let flare = match bar.media_flare {
         Some(_) => time::every(Duration::from_millis(16)).map(|_| Message::MediaFrame),
         None => Subscription::none(),
@@ -524,6 +540,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         time::every(Duration::from_secs(1)).map(|_| Message::Tick),
         time::every(MEETINGS_POLL).map(|_| Message::FetchMeetings),
         Subscription::run(hyprland::active_window_events).map(Message::ActiveWindow),
+        Subscription::run(hyprland::monitor_events).map(Message::Monitors),
         Subscription::run(tray::events).map(Message::Tray),
         Subscription::run(shortcuts::events).map(|shortcut| match shortcut {
             shortcuts::Shortcut::PanelToggle => Message::TogglePanel,
@@ -540,6 +557,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         ring,
         media,
         flare,
+        workspace_move,
     ])
 }
 
@@ -706,6 +724,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::WindowClosed(id) => {
             bar.surfaces.remove(&id);
+            bar.bars.remove(&id);
             // The compositor dismissed it, for example a popup clicked outside.
             if bar.tray_menu == Some(id) {
                 bar.tray_menu = None;
@@ -866,6 +885,19 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if bar.launcher_surface.as_ref().is_some_and(|open| open.panel == id) {
                 return iced::widget::operation::focus(launcher::input_id());
             }
+        }
+        Message::Monitors(monitors) => return set_monitors(bar, monitors),
+        Message::OpenBar(name) => {
+            if !bar.monitors.iter().any(|monitor| monitor.name == name) || bar.bars.values().any(|open| *open == name) {
+                return Task::none();
+            }
+            let id = Id::unique();
+            bar.bars.insert(id, name.clone());
+            return Task::done(Message::NewLayerShell { settings: bar_settings(name), id });
+        }
+        Message::WorkspaceFrame => {
+            let now = Instant::now();
+            bar.workspaces.values_mut().for_each(|indicator| indicator.settle(now));
         }
         Message::ToggleLauncher => {
             return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar) };
@@ -1364,6 +1396,59 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
 
 /// Transparent layer covering the screen that catches clicks outside a panel or popover:
 /// layer surfaces have no "click outside" event. Created first so the surface stacks above it.
+/// Moves the workspace indicators and opens or closes bars as monitors come and go.
+fn set_monitors(bar: &mut Bar, monitors: Vec<hyprland::Monitor>) -> Task<Message> {
+    let now = Instant::now();
+    bar.workspaces.retain(|name, _| monitors.iter().any(|monitor| monitor.name == *name));
+    for monitor in &monitors {
+        let Some(slot) = workspaces::slot(monitor.workspace) else {
+            continue;
+        };
+        bar.workspaces
+            .entry(monitor.name.clone())
+            .and_modify(|indicator| indicator.move_to(slot, now))
+            .or_insert_with(|| workspaces::Indicator::new(slot));
+    }
+
+    let mut tasks = Vec::new();
+    let gone: Vec<Id> = bar
+        .bars
+        .iter()
+        .filter(|(_, name)| !monitors.iter().any(|monitor| monitor.name == **name))
+        .map(|(id, _)| *id)
+        .collect();
+    for id in gone {
+        bar.bars.remove(&id);
+        tasks.push(Task::done(Message::RemoveWindow(id)));
+    }
+    // At start every output is known; a monitor plugged in later reaches Hyprland's socket
+    // before its wl_output name reaches layershellev, which would put the bar on the focused one.
+    let starting = bar.bars.is_empty() && bar.monitors.is_empty();
+    for monitor in monitors.iter().filter(|monitor| !bar.bars.values().any(|name| *name == monitor.name)) {
+        let name = monitor.name.clone();
+        tasks.push(match starting {
+            true => Task::done(Message::OpenBar(name)),
+            false => Task::perform(tokio::time::sleep(NEW_MONITOR_DELAY), move |()| Message::OpenBar(name.clone())),
+        });
+    }
+    bar.monitors = monitors;
+    Task::batch(tasks)
+}
+
+fn bar_settings(output: String) -> NewLayerShellSettings {
+    NewLayerShellSettings {
+        size: Some((0, BAR_HEIGHT)),
+        layer: Layer::Top,
+        anchor: Anchor::Top | Anchor::Left | Anchor::Right,
+        exclusive_zone: Some(BAR_HEIGHT as i32),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::OnDemand,
+        output_option: OutputOption::OutputName(output),
+        events_transparent: false,
+        namespace: Some(namespace()),
+    }
+}
+
 fn catcher_settings(output: String, namespace: &str) -> NewLayerShellSettings {
     NewLayerShellSettings {
         size: Some((0, 0)),
@@ -1740,7 +1825,15 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     let content = container(
         row![
             container(window).width(Length::FillPortion(1)).clip(true),
-            container(Row::new().push(media::bar_button(bar)).push(clock).push(meeting_pill(bar)).spacing(6).align_y(Alignment::Center))
+            container(
+                Row::new()
+                    .push(media::bar_button(bar))
+                    .push(workspace_indicator(bar, id))
+                    .push(clock)
+                    .push(meeting_pill(bar))
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+            )
                 .center_x(Length::FillPortion(1)),
             container(tray_view(bar, id)).align_right(Length::FillPortion(1)),
             // Hovering the right edge opens the side panel, like ii.
@@ -1754,6 +1847,12 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     container(column![content, line(theme.bar_border)])
         .style(move |_| container::background(theme.bar_background))
         .into()
+}
+
+/// The workspaces of the monitor the bar `id` is on.
+fn workspace_indicator(bar: &Bar, id: Id) -> Element<'_, Message> {
+    let name = bar.bars.get(&id);
+    workspaces::view(name.and_then(|name| bar.workspaces.get(name)), bar.theme)
 }
 
 /// Next meeting beside the clock, or `SIGN IN` when the calendar token expired.
