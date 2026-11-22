@@ -1,5 +1,6 @@
 mod agenda;
 mod alert;
+mod apps;
 mod audio;
 mod bluetooth;
 mod brightness;
