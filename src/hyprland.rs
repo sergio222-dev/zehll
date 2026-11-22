@@ -229,6 +229,18 @@ pub fn focused_monitor() -> Option<String> {
     focused_monitor_json()?["name"].as_str().map(str::to_owned)
 }
 
+/// Width of the focused monitor in logical pixels, the unit of layer surface margins.
+pub fn focused_monitor_width() -> Option<i32> {
+    let monitor = focused_monitor_json()?;
+    let scale = monitor["scale"].as_f64().filter(|scale| *scale > 0.0).unwrap_or(1.0);
+    Some((monitor["width"].as_f64()? / scale).round() as i32)
+}
+
+/// Shows the workspace `id` on the focused monitor.
+pub fn focus_workspace(id: i64) -> bool {
+    dispatch(&format!("hl.dsp.focus({{ workspace = \"{id}\", on_current_monitor = true }})"), &format!("workspace {id}"))
+}
+
 /// Cursor x relative to the left edge of the focused monitor, which is where the bar starts.
 pub fn cursor_x_on_focused_monitor() -> Option<i32> {
     let cursor = request("j/cursorpos")?["x"].as_i64()?;

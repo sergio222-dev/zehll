@@ -4,16 +4,17 @@
 
 use std::time::{Duration, Instant};
 
-use iced::widget::{Row, Shader, Space, Stack, container};
-use iced::{Border, Color, Element, Length, Padding, Shadow};
+use iced::widget::{Row, Shader, Space, Stack, container, mouse_area};
+use iced::{Border, Color, Element, Length, Padding, Shadow, mouse};
 
 use crate::theme::Theme;
 use crate::trail::Trail;
 
 const DOT: f32 = 6.0;
 const DISC: f32 = 18.0;
-// Room left of the first slot, apart from the bar row's spacing.
-const LEADING: f32 = 12.0;
+// Room on each side of the slots, apart from the bar row's spacing; even, so the slots stay
+// centered on the bar.
+const MARGIN: f32 = 6.0;
 
 /// hyprsplit's `num_workspaces`.
 pub const PER_MONITOR: i64 = 4;
@@ -28,6 +29,12 @@ const TAIL: Duration = Duration::from_millis(320);
 /// Slot of a workspace id in its monitor's range; `None` for special workspaces.
 pub fn slot(workspace: i64) -> Option<usize> {
     (workspace >= 1).then(|| ((workspace - 1) % PER_MONITOR) as usize)
+}
+
+/// Id of the workspace in `slot` of the range that holds `active`, the monitor's workspace.
+pub fn target(active: i64, slot: usize) -> Option<i64> {
+    let current = self::slot(active)?;
+    Some(active - current as i64 + slot as i64)
 }
 
 /// Which slots of a monitor have windows, from the ids of its workspaces with windows.
@@ -111,11 +118,12 @@ impl Indicator {
 }
 
 /// A monitor's workspaces, a dot each or a faint circle when it has windows, with the disc on
-/// the current one; no disc when the monitor is unknown.
-pub fn view<'a, Message: 'a>(
+/// the current one; no disc when the monitor is unknown. Clicking a slot sends `select(slot)`.
+pub fn view<'a, Message: Clone + 'a>(
     indicator: Option<&Indicator>,
     occupied: [bool; PER_MONITOR as usize],
     theme: Theme,
+    select: impl Fn(usize) -> Option<Message>,
 ) -> Element<'a, Message> {
     let slot = |occupied: bool| {
         let mark = match occupied {
@@ -140,7 +148,16 @@ pub fn view<'a, Message: 'a>(
         let left = center(frame.head) - DISC / 2.0;
         layers = layers.push(container(disc).padding(Padding::ZERO.left(left)));
     }
-    container(layers).padding(Padding::ZERO.left(LEADING)).height(Length::Fill).into()
+    // On top, so the disc and the trail do not swallow the clicks.
+    let targets = (0..PER_MONITOR as usize).map(|slot| {
+        let area = mouse_area(Space::new().width(Length::Fixed(SLOT)).height(Length::Fill));
+        match select(slot) {
+            Some(message) => area.on_press(message).interaction(mouse::Interaction::Pointer).into(),
+            None => area.into(),
+        }
+    });
+    layers = layers.push(Row::with_children(targets));
+    container(layers).padding([0.0, MARGIN]).height(Length::Fill).into()
 }
 
 fn mix(from: Color, to: Color, amount: f32) -> Color {
@@ -180,6 +197,14 @@ mod tests {
         assert_eq!([1, 2, 3, 4, 5, 8, 11].map(slot), [0, 1, 2, 3, 0, 3, 2].map(Some));
         assert_eq!(slot(0), None);
         assert_eq!(slot(-98), None);
+    }
+
+    #[test]
+    fn a_click_picks_the_workspace_in_the_same_range() {
+        assert_eq!(target(6, 0), Some(5));
+        assert_eq!(target(6, 3), Some(8));
+        assert_eq!(target(1, 2), Some(3));
+        assert_eq!(target(-98, 1), None);
     }
 
     #[test]

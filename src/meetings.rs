@@ -144,9 +144,9 @@ pub fn pill(status: Status, meetings: &[Meeting], now: NaiveDateTime) -> Option<
     }
 }
 
-/// `10:00 – 10:45 · IN 4 MIN`
-pub fn tooltip(meeting: &Meeting, now: NaiveDateTime) -> String {
-    format!("{} – {} · {}", meeting.start.format("%H:%M"), meeting.end.format("%H:%M"), countdown(meeting, now))
+/// `10:00 – 10:45`
+pub fn time_range(meeting: &Meeting) -> String {
+    format!("{} – {}", meeting.start.format("%H:%M"), meeting.end.format("%H:%M"))
 }
 
 /// Meetings starting on `date`, in start order.
@@ -442,7 +442,7 @@ mod tests {
     #[test]
     fn tooltip_text() {
         let m = meeting("review", at(21, 10, 0), at(21, 10, 45));
-        assert_eq!(tooltip(&m, at(21, 9, 56)), "10:00 – 10:45 · IN 4 MIN");
+        assert_eq!(time_range(&m), "10:00 – 10:45");
     }
 
     #[test]
