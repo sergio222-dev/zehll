@@ -84,8 +84,9 @@ const TOOLTIP_ROW_HEIGHT: u32 = 38;
 const TOOLTIP_STRIP_HEIGHT: u32 = 28;
 const TOOLTIP_LINE_HEIGHT: u32 = 20;
 const TOOLTIP_LIST_PADDING: (u16, u16) = (8, 14);
-// Two 13 px lines with 8 px padding; long titles are clipped.
-const MEETING_TOOLTIP_SIZE: (u32, u32) = (300, 56);
+// Two 15 px rows with 10 px padding; long titles are clipped.
+const MEETING_TOOLTIP_SIZE: (u32, u32) = (360, 64);
+const MEETING_TIME: Color = Color::from_rgb8(0xc9, 0xd2, 0xe8);
 
 pub fn main() -> Result<(), iced_layershell::Error> {
     daemon(Bar::new, namespace, update, view)
@@ -443,6 +444,7 @@ enum Message {
     OpenBar(String),
     // Redraws the workspace indicators while one is moving.
     WorkspaceFrame,
+    FocusWorkspace(i64),
     ToggleLauncher,
     LauncherQuery(String),
     LauncherNav(launcher::Nav),
@@ -626,13 +628,16 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 Tooltip::Meeting => MEETING_TOOLTIP_SIZE,
                 Tooltip::Media => media::TOOLTIP_SIZE,
             };
+            // The clock sits right of the centered workspaces, so the tooltips hang under the
+            // pointer, like the tray menus, instead of under the bar's center.
+            let cursor = hyprland::cursor_x_on_focused_monitor().unwrap_or_default();
+            let width = hyprland::focused_monitor_width().unwrap_or(size.0 as i32);
             let settings = NewLayerShellSettings {
                 size: Some(size),
                 layer: Layer::Overlay,
-                // Anchored only to the top, so it is centered under the clock and the meeting pill.
-                anchor: Anchor::Top,
+                anchor: Anchor::Top | Anchor::Left,
                 exclusive_zone: Some(0),
-                margin: Some((8, 0, 0, 0)),
+                margin: Some((8, 0, 0, hang_under(cursor, size.0 as i32, width))),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::OutputName(output),
                 events_transparent: true,
@@ -895,6 +900,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let id = Id::unique();
             bar.bars.insert(id, name.clone());
             return Task::done(Message::NewLayerShell { settings: bar_settings(name), id });
+        }
+        Message::FocusWorkspace(workspace) => {
+            hyprland::focus_workspace(workspace);
         }
         Message::WorkspaceFrame => {
             let now = Instant::now();
@@ -1826,19 +1834,23 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     let content = container(
         row![
             container(window).width(Length::FillPortion(1)).clip(true),
-            container(
-                Row::new()
-                    .push(media::bar_button(bar))
-                    .push(workspace_indicator(bar, id))
-                    .push(clock)
-                    .push(meeting_pill(bar))
-                    .spacing(6)
-                    .align_y(Alignment::Center)
-            )
-                .center_x(Length::FillPortion(1)),
-            container(tray_view(bar, id)).align_right(Length::FillPortion(1)),
-            // Hovering the right edge opens the side panel, like ii.
-            mouse_area(Space::new().width(f32::from(BAR_PADDING)).height(Length::Fill)).on_enter(Message::HoverPanel),
+            // The workspaces sit on the bar's center: both sides of the middle third fill equally.
+            row![
+                container(Row::new().push(media::bar_button(bar))).align_right(Length::Fill),
+                workspace_indicator(bar, id),
+                container(Row::new().push(clock).push(meeting_pill(bar)).spacing(6).align_y(Alignment::Center))
+                    .align_left(Length::Fill),
+            ]
+            .spacing(6)
+            .width(Length::FillPortion(1))
+            .align_y(Alignment::Center),
+            row![
+                container(tray_view(bar, id)).align_right(Length::Fill),
+                // Hovering the right edge opens the side panel, like ii.
+                mouse_area(Space::new().width(f32::from(BAR_PADDING)).height(Length::Fill)).on_enter(Message::HoverPanel),
+            ]
+            .width(Length::FillPortion(1))
+            .align_y(Alignment::Center),
         ]
         .height(Length::Fill)
         .align_y(Alignment::Center),
@@ -1859,7 +1871,15 @@ fn workspace_indicator(bar: &Bar, id: Id) -> Element<'_, Message> {
         .find(|monitor| Some(&monitor.name) == name)
         .map(|monitor| workspaces::occupied_slots(&monitor.occupied))
         .unwrap_or_default();
-    workspaces::view(name.and_then(|name| bar.workspaces.get(name)), occupied, bar.theme)
+    let active = bar.monitors.iter().find(|monitor| Some(&monitor.name) == name).map(|monitor| monitor.workspace);
+    let select = move |slot| active.and_then(|active| workspaces::target(active, slot)).map(Message::FocusWorkspace);
+    workspaces::view(name.and_then(|name| bar.workspaces.get(name)), occupied, bar.theme, select)
+}
+
+/// Left margin of a surface `width` wide, centered under the pointer and kept on the monitor.
+fn hang_under(cursor: i32, width: i32, monitor: i32) -> i32 {
+    const EDGE: i32 = 8;
+    (cursor - width / 2).min(monitor - width - EDGE).max(EDGE)
 }
 
 /// Next meeting beside the clock, or `SIGN IN` when the calendar token expired.
@@ -1894,16 +1914,31 @@ fn meeting_tooltip(bar: &Bar) -> Element<'_, Message> {
     let theme = bar.theme;
     let now = bar.now.naive_local();
     let content: Element<'_, Message> = match meetings::next_meeting(&bar.meetings, now) {
-        Some(meeting) => column![
-            text(&meeting.title).font(BODY_BOLD).size(13).wrapping(text::Wrapping::None),
-            text(meetings::tooltip(meeting, now)).font(CONDENSED).size(13).color(theme.accent),
-        ]
-        .spacing(2)
-        .into(),
+        Some(meeting) => {
+            let glyph = |name| container(icon_sized(name, 16.0)).style(move |_| container::Style {
+                text_color: Some(theme.text_muted),
+                ..Default::default()
+            });
+            column![
+                row![glyph("event"), text(&meeting.title).font(BODY_BOLD).size(15).wrapping(text::Wrapping::None)]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                row![
+                    glyph("schedule"),
+                    text(meetings::time_range(meeting)).font(CONDENSED).size(15).color(MEETING_TIME),
+                    Space::new().width(Length::Fill),
+                    text(meetings::countdown(meeting, now)).font(CONDENSED_BOLD).size(15).color(theme.accent),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            ]
+            .spacing(6)
+            .into()
+        }
         None => Space::new().into(),
     };
     container(content)
-        .padding([8, 12])
+        .padding([10, 14])
         .width(Length::Fill)
         .height(Length::Fill)
         .clip(true)
@@ -2141,5 +2176,17 @@ fn style(bar: &Bar, _: &iced::Theme) -> iced::theme::Style {
     iced::theme::Style {
         background_color: Color::TRANSPARENT,
         text_color: bar.theme.text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltips_hang_centered_under_the_pointer_inside_the_monitor() {
+        assert_eq!(hang_under(1000, 360, 2560), 820);
+        assert_eq!(hang_under(100, 360, 2560), 8);
+        assert_eq!(hang_under(2550, 360, 2560), 2192);
     }
 }
