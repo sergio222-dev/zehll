@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use iced::futures::StreamExt;
+use iced::futures::{Stream, StreamExt};
 use zbus::message::Type;
 use zbus::proxy::{Builder, CacheProperties};
 use zbus::{Connection, MatchRule, MessageStream, Proxy};
@@ -26,7 +26,7 @@ pub async fn signals(connection: &Connection, service: &str) -> zbus::Result<Mes
 }
 
 /// Waits for the next signal and swallows the rest of its burst. Returns false when the stream ends.
-pub async fn next_change(signals: &mut MessageStream) -> bool {
+pub async fn next_change<S: Stream + Unpin>(signals: &mut S) -> bool {
     if signals.next().await.is_none() {
         return false;
     }

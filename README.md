@@ -11,6 +11,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - System tray (StatusNotifierItem): icons, left/middle click activation and right-click context menus (DBusMenu) with submenus and toggles.
 - Side panel with uptime, reload and power actions, quick settings, notifications, a month calendar and a to-do list shared with ii (`~/.local/state/quickshell/user/todo.json`) and a pomodoro timer (25/5 min, a 15 min break every 4 cycles) that notifies when each phase ends.
 - Google Calendar meetings: the next meeting beside the clock, a calendar popover with each day's agenda, and alerts when a meeting is about to start.
+- Media player (MPRIS): a play/pause button left of the date opens a player popover, with cover art, seek bar, previous/next, shuffle and repeat.
 - One bar per monitor.
 - Material 3 theme loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -20,6 +21,8 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - A Rust toolchain (edition 2024)
 - [Material Symbols Rounded](https://github.com/google/material-design-icons) font for icons
 - Optional: [matugen](https://github.com/InioX/matugen) for wallpaper-based colors
+- Optional, for cover art that players link over HTTP (such as Spotify): `curl`
+- Optional, for the audio spectrum behind the player popover: [cava](https://github.com/karlstav/cava)
 - Optional, for meetings: `python3`, a Google OAuth client in `~/.config/calendarz/credentials.json`, `pw-play` (PipeWire) for the alert sound and `xdg-open`
 
 ## Build and run
@@ -79,6 +82,12 @@ bind = SUPER SHIFT, M, global, zehll:meetingTest
 ```
 
 The calendar and the alert cards use the layer namespaces `zehll-calendar`, `zehll-calendar-catcher` and `zehll-meeting-alerts` for layer rules.
+
+## Media player
+
+The button left of the date shows pause while the active player plays and play otherwise; it is hidden when no MPRIS player runs. When playback starts, flames burst out of its edges; when it stops, they burn out as red embers. The flames are a wgpu shader (`src/flame.wgsl`) and are not drawn with iced's software renderer. Like ii, the active player is the one playing, preferring the one already shown; `playerctld` is ignored because it mirrors the others. Hover it for the track and the player name; click it to open the player popover, and click outside it or press Escape to close it. Shuffle and repeat are disabled for players that do not support them. Live streams have no length to seek in: they show a wave that moves while playing and `LIVE`, without seeking or elapsed time. While the popover is open and the player is playing, `cava` draws the audio spectrum behind it, like ii.
+
+The popover uses the layer namespaces `zehll-media` and `zehll-media-catcher` for layer rules.
 
 ## Theme
 
