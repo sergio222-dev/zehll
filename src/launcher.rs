@@ -8,7 +8,7 @@ use iced::{Alignment, Border, Color, Element, Font, Length, Padding, mouse};
 
 use crate::apps::{self, App, Score};
 use crate::keybinds::Keybind;
-use crate::{calc, files, fuzzy, tray};
+use crate::{calc, clipboard, files, fuzzy, tray};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
@@ -158,6 +158,13 @@ impl Power {
     }
 }
 
+/// A step waiting for a second request before it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pending {
+    Power(Power),
+    ClearClipboard,
+}
+
 /// What a launcher row does when activated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
@@ -171,6 +178,8 @@ pub enum Action {
     Power(Power),
     /// Open it, or with Ctrl+Enter put its path in the search.
     File(files::Entry),
+    /// Copy it back, or with Ctrl+Enter pin or unpin it.
+    Clip(clipboard::Entry),
 }
 
 #[derive(Clone, Debug)]
@@ -241,8 +250,72 @@ pub fn items(launcher: &Launcher) -> Vec<Item> {
         Page::Keybinds => keybind_items(launcher),
         Page::Calculator => history_items(launcher),
         Page::Files => file_items(launcher),
-        Page::Clipboard => Vec::new(),
+        Page::Clipboard => clip_items(launcher),
     }
+}
+
+/// Clipboard history matching the search, pinned entries first, else newest first; only the
+/// pinned ones while the pin button is on.
+fn clip_items(launcher: &Launcher) -> Vec<Item> {
+    let mut entries: Vec<&clipboard::Entry> = launcher
+        .clips
+        .iter()
+        .filter(|entry| (!launcher.pinned_only || launcher.is_pinned(entry)) && clipboard::matches(&launcher.query, &entry.preview))
+        .collect();
+    entries.sort_by_key(|entry| !launcher.is_pinned(entry));
+    entries
+        .into_iter()
+        .map(|entry| Item {
+            icon: ItemIcon::Symbol(match (launcher.is_pinned(entry), entry.is_image()) {
+                (true, _) => "push_pin",
+                (false, true) => "image",
+                (false, false) => "content_copy",
+            }),
+            title: entry.preview.clone(),
+            title_style: TitleStyle::Mono,
+            description: String::new(),
+            tag: String::new(),
+            running: false,
+            action: Action::Clip(entry.clone()),
+        })
+        .collect()
+}
+
+/// The entry the Clipboard preview shows.
+pub fn selected_clip(launcher: &Launcher) -> Option<clipboard::Entry> {
+    match items(launcher).into_iter().nth(launcher.selected)?.action {
+        Action::Clip(entry) => Some(entry),
+        _ => None,
+    }
+}
+
+/// Key/value rows under the Clipboard preview. cliphist keeps no time, so the date is unknown.
+fn clip_rows(launcher: &Launcher, entry: &clipboard::Entry) -> Vec<(&'static str, String)> {
+    vec![
+        ("TYPE", entry.type_label()),
+        ("MIME", entry.mime()),
+        ("DATE", String::from("—")),
+        ("HASH", launcher.decoded(entry.id).map_or_else(|| String::from("…"), |decoded| decoded.hash.clone())),
+    ]
+}
+
+/// The Clipboard preview: the decoded text or image, and the entry's details.
+fn clip_preview<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Element<'a, Message> {
+    let Some(entry) = selected_clip(launcher) else {
+        return preview_pane(theme, Space::new().into(), Vec::new());
+    };
+    let decoded = launcher.decoded(entry.id);
+    let content: Element<'a, Message> = match (decoded.and_then(|decoded| decoded.image.clone()), decoded.and_then(|decoded| decoded.text.as_deref())) {
+        (Some(handle), _) => container(image(handle).content_fit(iced::ContentFit::Contain)).padding(10).center(Length::Fill).into(),
+        (None, Some(preview)) => container(text(preview).font(Font::MONOSPACE).size(11).color(theme.text_muted))
+            .padding(10)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .clip(true)
+            .into(),
+        (None, None) => container(icon_colored(if entry.is_image() { "image" } else { "content_paste" }, 64.0, theme.text_dim)).center(Length::Fill).into(),
+    };
+    preview_pane(theme, content, clip_rows(launcher, &entry))
 }
 
 /// Recent folders, or recent and found entries matching the search, best first.
@@ -271,7 +344,7 @@ pub fn selected_file(launcher: &Launcher) -> Option<files::Entry> {
 
 /// Pages that show the selected row beside the list.
 pub fn has_preview(page: Page) -> bool {
-    page == Page::Files
+    matches!(page, Page::Files | Page::Clipboard)
 }
 
 /// Key/value rows under the Files preview; `…` while the details load.
@@ -413,7 +486,7 @@ fn home_items(launcher: &Launcher) -> Vec<Item> {
                 title: power.title().to_string(),
                 title_style: TitleStyle::Body,
                 description: power.description().to_string(),
-                tag: String::from(if launcher.confirm == Some(power) { "CONFIRM ↵" } else { "COMMAND" }),
+                tag: String::from(if launcher.confirm == Some(Pending::Power(power)) { "CONFIRM ↵" } else { "COMMAND" }),
                 running: false,
                 action: Action::Power(power),
             };
@@ -431,6 +504,8 @@ pub fn section(launcher: &Launcher, count: usize) -> String {
         (Page::Home, true) => String::from("SUGGESTIONS"),
         (Page::Keybinds, true) => String::from("KEYBINDS"),
         (Page::Files, true) => String::from("RECENT FOLDERS (ZOXIDE)"),
+        (Page::Clipboard, _) if launcher.pinned_only => format!("PINNED ({count})"),
+        (Page::Clipboard, true) => format!("HISTORY ({count})"),
         (Page::Calculator, _) => String::from("HISTORY"),
         _ => format!("RESULTS ({count})"),
     }
@@ -443,7 +518,7 @@ pub fn hints(page: Page) -> &'static [(&'static str, &'static str)] {
         Page::Keybinds => &[("↑↓", "move"), ("⇧ESC", "back"), ("ESC", "close")],
         Page::Calculator => &[("↵", "copy"), ("^↵", "reuse"), ("TAB", "history"), ("⇧ESC", "back")],
         Page::Files => &[("↵", "open"), ("^↵", "path"), ("⇧ESC", "back")],
-        Page::Clipboard => &[("↵", "open"), ("⇧ESC", "back"), ("ESC", "close")],
+        Page::Clipboard => &[("↵", "copy"), ("^↵", "pin"), ("⇧ESC", "back")],
     }
 }
 
@@ -482,8 +557,20 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
             value: theme.text,
             selection: Color { a: 0.3, ..theme.glow },
         });
-    let search = row![slanted(chip, 14.0, theme.accent), container(input).width(Length::Fill).center_y(Length::Fill)]
+    let mut search = row![slanted(chip, 14.0, theme.accent), container(input).width(Length::Fill).center_y(Length::Fill)];
+    if page == Page::Clipboard {
+        let pin_color = if launcher.pinned_only { theme.accent } else { theme.text };
+        search = search.push(bracket_button(theme, "push_pin", pin_color, Message::ClipboardPinnedOnly));
+        // The clear button asks for a second press, saying so beside it.
+        if launcher.clear_armed() {
+            search = search.push(text("CONFIRM").font(CONDENSED_BOLD).size(12).color(theme.accent));
+        }
+        let clear_color = if launcher.clear_armed() { theme.accent } else { theme.text };
+        search = search.push(bracket_button(theme, "delete_sweep", clear_color, Message::ClipboardClear));
+    }
+    let search = search
         .spacing(14)
+        .align_y(Alignment::Center)
         .padding(Padding::ZERO.right(18.0))
         .height(SEARCH_HEIGHT);
 
@@ -515,7 +602,11 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         Some(answer) => column![answer_card(theme, answer), header, list].height(Length::Fill).into(),
         None if has_preview(page) => {
             let divider = container(Space::new()).width(1).height(Length::Fill).style(move |_| container::background(theme.border));
-            row![column![header, list].width(PREVIEW_LIST_WIDTH).height(Length::Fill), divider, file_preview(theme, launcher)].height(Length::Fill).into()
+            let preview = match page {
+                Page::Clipboard => clip_preview(theme, launcher),
+                _ => file_preview(theme, launcher),
+            };
+            row![column![header, list].width(PREVIEW_LIST_WIDTH).height(Length::Fill), divider, preview].height(Length::Fill).into()
         }
         None => column![header, list].height(Length::Fill).into(),
     };
@@ -566,6 +657,12 @@ fn answer_card(theme: crate::theme::Theme, answer: &calc::Answer) -> Element<'_,
     .into()
 }
 
+/// An icon in corner brackets, like the panel's buttons.
+fn bracket_button<'a>(theme: crate::theme::Theme, name: &'static str, color: Color, message: Message) -> Element<'a, Message> {
+    let content = Stack::new().push(container(icon_colored(name, 18.0, color)).center(34)).push_under(shape(shape::Kind::BRACKETS, theme.bracket));
+    button(content).on_press(message).padding(0).style(move |_, status| glow_style(theme, status, 10.0)).into()
+}
+
 fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: bool) -> Element<'a, Message> {
     let icon_color = if selected { theme.glow } else { theme.text };
     let icon: Element<'a, Message> = match item.icon {
@@ -580,23 +677,42 @@ fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: 
         false => Space::new().height(8).into(),
     };
     let icon = column![container(icon).center_x(26).height(APP_ICON), running].spacing(1).align_x(Alignment::Center);
+    let title = match item.title_style {
+        TitleStyle::Body => text(item.title).font(BODY_BOLD).size(15),
+        TitleStyle::Keys => text(item.title).font(CONDENSED_BOLD).size(16),
+        TitleStyle::Mono => text(item.title).font(Font::MONOSPACE).size(14),
+    }
+    .wrapping(text::Wrapping::None);
+    // Without a description the title takes the room, cut at the edge, as clipboard text runs long.
+    let (title, description): (Element<'a, Message>, Element<'a, Message>) = match item.description.is_empty() {
+        true => (container(title).width(Length::Fill).clip(true).into(), Space::new().into()),
+        false => (
+            title.into(),
+            container(text(item.description).font(BODY_FONT).size(12).color(theme.text_muted).wrapping(text::Wrapping::None))
+                .width(Length::Fill)
+                .clip(true)
+                .into(),
+        ),
+    };
+    let trash: Element<'a, Message> = match (&item.action, selected) {
+        (Action::Clip(entry), true) => button(container(icon_colored("delete", 18.0, theme.text)).center(28))
+            .on_press(Message::ClipboardDelete(entry.clone()))
+            .padding(0)
+            .style(move |_, status| glow_style(theme, status, 6.0))
+            .into(),
+        _ => Space::new().into(),
+    };
     let content = row![
         icon,
-        match item.title_style {
-            TitleStyle::Body => text(item.title).font(BODY_BOLD).size(15),
-            TitleStyle::Keys => text(item.title).font(CONDENSED_BOLD).size(16),
-            TitleStyle::Mono => text(item.title).font(Font::MONOSPACE).size(14),
-        }
-        .wrapping(text::Wrapping::None),
-        container(text(item.description).font(BODY_FONT).size(12).color(theme.text_muted).wrapping(text::Wrapping::None))
-            .width(Length::Fill)
-            .clip(true),
+        title,
+        description,
         match item.title_style {
             // A keybinding's description reads as text, not as a label.
             TitleStyle::Keys => text(item.tag).font(BODY_FONT).size(13).color(theme.text_muted),
             TitleStyle::Body => text(item.tag).font(CONDENSED_BOLD).size(12).color(theme.text_muted),
             TitleStyle::Mono => text(item.tag).font(CONDENSED_BOLD).size(17).color(theme.text),
         },
+        trash,
     ]
     .spacing(12)
     .align_y(Alignment::Center);
@@ -648,8 +764,8 @@ pub struct Launcher {
     pub running: Vec<String>,
     /// Unix seconds when the launcher opened, for decaying launch scores.
     pub now: i64,
-    /// Command waiting for a second Enter.
-    confirm: Option<Power>,
+    /// Command or clear waiting for a second request.
+    confirm: Option<Pending>,
     /// Home folder, for `~` in searches and paths.
     pub home: String,
     /// Folders from zoxide, best first, read when the Files page opens.
@@ -658,6 +774,16 @@ pub struct Launcher {
     found: Vec<files::Entry>,
     /// Details of previewed entries by path.
     file_details: HashMap<String, files::Details>,
+    /// Clipboard history, newest first, read when the Clipboard page opens.
+    pub clips: Vec<clipboard::Entry>,
+    /// Latest history read asked for; older ones arriving late are dropped.
+    clips_request: u64,
+    /// Pinned clipboard entries by their pin key.
+    pub pins: Vec<String>,
+    /// The pin button shows only the pinned entries.
+    pub pinned_only: bool,
+    /// Decoded clipboard entries by id.
+    decoded: HashMap<u64, clipboard::Decoded>,
 }
 
 impl Launcher {
@@ -680,13 +806,18 @@ impl Launcher {
             recent: Vec::new(),
             found: Vec::new(),
             file_details: HashMap::new(),
+            clips: Vec::new(),
+            clips_request: 0,
+            pins: Vec::new(),
+            pinned_only: false,
+            decoded: HashMap::new(),
         }
     }
 
     /// With the saved launch scores, calculator history and home folder.
     pub fn load() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
-        Self { scores: apps::load_scores(), history: calc::load_history(), home, ..Self::new() }
+        Self { scores: apps::load_scores(), history: calc::load_history(), pins: clipboard::load_pins(), home, ..Self::new() }
     }
 
     /// The calculator's answer, if it is for the current search.
@@ -736,12 +867,99 @@ impl Launcher {
 
     /// Whether `power` should run now: at once, or on the second request when it needs confirming.
     pub fn confirm(&mut self, power: Power) -> bool {
-        if !power.needs_confirm() || self.confirm == Some(power) {
+        if !power.needs_confirm() {
             self.confirm = None;
             return true;
         }
-        self.confirm = Some(power);
+        self.second_request(Pending::Power(power))
+    }
+
+    /// Whether the clipboard history should be wiped now: on the second press of the clear button.
+    pub fn confirm_clear(&mut self) -> bool {
+        self.second_request(Pending::ClearClipboard)
+    }
+
+    pub fn clear_armed(&self) -> bool {
+        self.confirm == Some(Pending::ClearClipboard)
+    }
+
+    fn second_request(&mut self, pending: Pending) -> bool {
+        if self.confirm == Some(pending) {
+            self.confirm = None;
+            return true;
+        }
+        self.confirm = Some(pending);
         false
+    }
+
+    /// Starts a history read; its answer must carry the returned number to be kept.
+    pub fn begin_clips(&mut self) -> u64 {
+        self.clips_request += 1;
+        self.clips_request
+    }
+
+    pub fn set_clips(&mut self, request: u64, clips: Vec<clipboard::Entry>) {
+        if request == self.clips_request {
+            self.clips = clips;
+            self.keep_selection();
+        }
+    }
+
+    /// Drops a deleted entry at once, before cliphist answers.
+    pub fn remove_clip(&mut self, id: u64) {
+        self.clips.retain(|entry| entry.id != id);
+        self.confirm = None;
+        self.keep_selection();
+    }
+
+    pub fn clear_clips(&mut self) {
+        self.clips.clear();
+        self.decoded.clear();
+        self.keep_selection();
+    }
+
+    pub fn is_pinned(&self, entry: &clipboard::Entry) -> bool {
+        self.pins.iter().any(|pin| pin == entry.pin_key())
+    }
+
+    pub fn toggle_pin(&mut self, entry: &clipboard::Entry) {
+        clipboard::toggle_pin(&mut self.pins, entry.pin_key());
+        self.confirm = None;
+        // Pinned entries move to the top; the selection follows the entry while it is listed.
+        match items(self).iter().position(|item| matches!(&item.action, Action::Clip(listed) if listed.id == entry.id)) {
+            Some(at) => {
+                self.selected = at;
+                let visible = self.visible_rows();
+                self.first = self.first.min(at).max((at + 1).saturating_sub(visible));
+            }
+            None => self.keep_selection(),
+        }
+    }
+
+    pub fn toggle_pinned_only(&mut self) {
+        self.pinned_only = !self.pinned_only;
+        self.selected = 0;
+        self.first = 0;
+        self.confirm = None;
+    }
+
+    pub fn set_decoded(&mut self, id: u64, decoded: clipboard::Decoded) {
+        // Images are kept decoded, so only the last few entries are.
+        if self.decoded.len() >= 32 {
+            self.decoded.clear();
+        }
+        self.decoded.insert(id, decoded);
+    }
+
+    pub fn decoded(&self, id: u64) -> Option<&clipboard::Decoded> {
+        self.decoded.get(&id)
+    }
+
+    /// Keeps the selection on the list after it shrank.
+    fn keep_selection(&mut self) {
+        let len = items(self).len();
+        self.selected = self.selected.min(len.saturating_sub(1));
+        self.first = self.first.min(self.selected);
     }
 
     pub fn page(&self) -> Page {
@@ -752,6 +970,10 @@ impl Launcher {
         if page == Page::Files {
             self.found.clear();
             self.file_details.clear();
+        }
+        if page == Page::Clipboard {
+            self.pinned_only = false;
+            self.decoded.clear();
         }
         self.stack.push(page);
         self.set_query(String::new());
@@ -1118,6 +1340,111 @@ mod tests {
             [("NAME", "zehll"), ("TYPE", "inode/directory"), ("SIZE", "4.0 KB"), ("PATH", "~/code/zehll"), ("ITEMS", "21")].map(|(k, v)| (k, v.to_string()))
         );
         assert_eq!(preview_rows(&launcher, &launcher.recent[1])[1], ("TYPE", String::from("…")));
+    }
+
+    fn clip(id: u64, preview: &str) -> clipboard::Entry {
+        clipboard::parse_line(&format!("{id}\t{preview}")).unwrap()
+    }
+
+    fn clipboard_page() -> Launcher {
+        let mut launcher = Launcher::new();
+        launcher.open(Page::Clipboard);
+        let request = launcher.begin_clips();
+        launcher.set_clips(request, vec![clip(30, "git push origin"), clip(29, "[[ binary data 4 KiB png 412x150 ]]"), clip(28, "token abc")]);
+        launcher
+    }
+
+    #[test]
+    fn the_clipboard_page_lists_the_history_matching_the_search() {
+        let mut launcher = clipboard_page();
+        assert_eq!(titles(&launcher), ["git push origin", "[[ binary data 4 KiB png 412x150 ]]", "token abc"]);
+        assert_eq!(section(&launcher, items(&launcher).len()), "HISTORY (3)");
+        let first = &items(&launcher)[0];
+        assert_eq!((first.title_style, &first.action), (TitleStyle::Mono, &Action::Clip(clip(30, "git push origin"))));
+        assert!(matches!(items(&launcher)[1].icon, ItemIcon::Symbol("image")));
+        launcher.set_query(String::from("PUSH git"));
+        assert_eq!(titles(&launcher), ["git push origin"]);
+        assert_eq!(section(&launcher, 1), "RESULTS (1)");
+        assert_eq!(hints(Page::Clipboard), [("↵", "copy"), ("^↵", "pin"), ("⇧ESC", "back")]);
+        assert!(has_preview(Page::Clipboard));
+    }
+
+    #[test]
+    fn the_clipboard_preview_shows_type_mime_date_and_hash() {
+        let mut launcher = clipboard_page();
+        launcher.move_selection(1, 3);
+        let image = selected_clip(&launcher).unwrap();
+        assert_eq!(
+            clip_rows(&launcher, &image),
+            [("TYPE", "Image 412x150, 4 KiB"), ("MIME", "image/png"), ("DATE", "—"), ("HASH", "…")].map(|(k, v)| (k, v.to_string()))
+        );
+        let text = clip(28, "token abc");
+        launcher.set_decoded(28, clipboard::Decoded::new(&text, b"token abc"));
+        assert_eq!(clip_rows(&launcher, &text)[3], ("HASH", clipboard::content_hash(b"token abc")));
+    }
+
+    #[test]
+    fn pinned_entries_come_first_and_stay_pinned_under_a_new_id() {
+        let mut launcher = clipboard_page();
+        launcher.toggle_pin(&clip(28, "token abc"));
+        assert_eq!(titles(&launcher)[0], "token abc");
+        // The selection follows the pinned entry.
+        assert_eq!(selected_clip(&launcher), Some(clip(28, "token abc")));
+        assert!(matches!(items(&launcher)[0].icon, ItemIcon::Symbol("push_pin")));
+        // Copying it back gives it a new id.
+        let request = launcher.begin_clips();
+        launcher.set_clips(request, vec![clip(31, "token abc"), clip(30, "git push origin")]);
+        assert_eq!(titles(&launcher), ["token abc", "git push origin"]);
+        assert!(launcher.is_pinned(&clip(31, "token abc")));
+    }
+
+    #[test]
+    fn the_pin_button_shows_only_pinned_entries() {
+        let mut launcher = clipboard_page();
+        launcher.toggle_pin(&clip(30, "git push origin"));
+        launcher.toggle_pinned_only();
+        assert_eq!(titles(&launcher), ["git push origin"]);
+        assert_eq!(section(&launcher, 1), "PINNED (1)");
+        launcher.toggle_pinned_only();
+        assert_eq!(titles(&launcher).len(), 3);
+    }
+
+    #[test]
+    fn clearing_the_history_needs_a_second_press() {
+        let mut launcher = clipboard_page();
+        assert!(!launcher.confirm_clear());
+        assert!(launcher.clear_armed());
+        assert!(launcher.confirm_clear());
+        assert!(!launcher.clear_armed());
+        // Moving or typing disarms it.
+        assert!(!launcher.confirm_clear());
+        launcher.move_selection(1, 3);
+        assert!(!launcher.clear_armed());
+        assert!(!launcher.confirm_clear());
+        launcher.set_query(String::from("g"));
+        assert!(!launcher.confirm_clear());
+        launcher.toggle_pinned_only();
+        assert!(!launcher.clear_armed());
+    }
+
+    #[test]
+    fn an_older_history_read_arriving_late_is_dropped() {
+        let mut launcher = clipboard_page();
+        let older = launcher.begin_clips();
+        let newer = launcher.begin_clips();
+        launcher.set_clips(newer, vec![clip(40, "fresh")]);
+        launcher.set_clips(older, vec![clip(30, "git push origin")]);
+        assert_eq!(titles(&launcher), ["fresh"]);
+    }
+
+    #[test]
+    fn deleting_the_last_entry_keeps_the_selection_on_the_list() {
+        let mut launcher = clipboard_page();
+        launcher.move_selection(2, 3);
+        launcher.remove_clip(28);
+        assert_eq!((titles(&launcher).len(), launcher.selected), (2, 1));
+        launcher.clear_clips();
+        assert_eq!((items(&launcher).len(), launcher.selected), (0, 0));
     }
 
     #[test]

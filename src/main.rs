@@ -445,6 +445,12 @@ enum Message {
     // fd's results and the search they were computed for.
     FilesFound(String, Vec<files::Entry>),
     FileDetails(String, Option<files::Details>),
+    // A clipboard history read and the request number it answers.
+    ClipboardList(u64, Vec<clipboard::Entry>),
+    ClipboardDecoded(u64, Option<clipboard::Decoded>),
+    ClipboardDelete(clipboard::Entry),
+    ClipboardClear,
+    ClipboardPinnedOnly,
 }
 
 fn namespace() -> String {
@@ -877,7 +883,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 }
                 launcher::Nav::Move(delta) => {
                     bar.launcher.move_selection(delta, len);
-                    return Task::batch([load_file_details(bar), focus_launcher()]);
+                    return Task::batch([load_preview(bar), focus_launcher()]);
                 }
                 launcher::Nav::Activate { secondary } if bar.launcher.page() == launcher::Page::Calculator => {
                     return calculator_enter(bar, secondary);
@@ -894,7 +900,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::LauncherScroll(rows, len) => bar.launcher.scroll(rows, len),
         Message::FilesRecent(recent) => {
             bar.launcher.recent = recent;
-            return load_file_details(bar);
+            return load_preview(bar);
         }
         Message::FilesSearch(query) => {
             if query == bar.launcher.query && bar.launcher.page() == launcher::Page::Files {
@@ -904,10 +910,47 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::FilesFound(query, found) => {
             bar.launcher.set_found(query, found);
-            return load_file_details(bar);
+            return load_preview(bar);
         }
         Message::FileDetails(path, Some(details)) => bar.launcher.set_details(path, details),
         Message::FileDetails(_, None) => {}
+        Message::ClipboardList(request, clips) => {
+            bar.launcher.set_clips(request, clips);
+            return load_preview(bar);
+        }
+        Message::ClipboardDecoded(id, Some(decoded)) => bar.launcher.set_decoded(id, decoded),
+        Message::ClipboardDecoded(_, None) => {}
+        Message::ClipboardDelete(entry) => {
+            bar.launcher.remove_clip(entry.id);
+            let request = bar.launcher.begin_clips();
+            let reload = Task::perform(
+                async move {
+                    clipboard::delete(entry).await;
+                    clipboard::list().await
+                },
+                move |clips| Message::ClipboardList(request, clips),
+            );
+            return Task::batch([reload, load_preview(bar), focus_launcher()]);
+        }
+        Message::ClipboardClear => {
+            if !bar.launcher.confirm_clear() {
+                return focus_launcher();
+            }
+            bar.launcher.clear_clips();
+            let request = bar.launcher.begin_clips();
+            let reload = Task::perform(
+                async {
+                    clipboard::wipe().await;
+                    clipboard::list().await
+                },
+                move |clips| Message::ClipboardList(request, clips),
+            );
+            return Task::batch([reload, focus_launcher()]);
+        }
+        Message::ClipboardPinnedOnly => {
+            bar.launcher.toggle_pinned_only();
+            return Task::batch([load_preview(bar), focus_launcher()]);
+        }
         Message::Media(command) => {
             if let Some(player) = bar.media.clone() {
                 return Task::future(mpris::run(player, command)).discard();
@@ -1472,6 +1515,10 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
             bar.launcher.open(page);
             match page {
                 launcher::Page::Files => Task::batch([Task::perform(files::recent(), Message::FilesRecent), focus_launcher()]),
+                launcher::Page::Clipboard => {
+                    let request = bar.launcher.begin_clips();
+                    Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
+                }
                 _ => focus_launcher(),
             }
         }
@@ -1504,6 +1551,12 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
             }
             close_launcher(bar)
         }
+        launcher::Action::Clip(entry) if secondary => {
+            bar.launcher.toggle_pin(&entry);
+            clipboard::save_pins(&bar.launcher.pins);
+            Task::batch([load_preview(bar), focus_launcher()])
+        }
+        launcher::Action::Clip(entry) => Task::batch([Task::future(clipboard::copy_entry(entry)).discard(), close_launcher(bar)]),
     }
 }
 
@@ -1512,20 +1565,30 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
 fn set_launcher_query(bar: &mut Bar, query: String) -> Task<Message> {
     bar.launcher.set_query(query.clone());
     if query.trim().is_empty() {
-        return load_file_details(bar);
+        return load_preview(bar);
     }
     match bar.launcher.page() {
         launcher::Page::Calculator => Task::perform(calc::evaluate(query.clone()), move |answer| Message::CalcAnswer(query.clone(), answer)),
         launcher::Page::Files => Task::batch([
-            load_file_details(bar),
+            load_preview(bar),
             Task::perform(tokio::time::sleep(FILES_DEBOUNCE), move |()| Message::FilesSearch(query.clone())),
         ]),
         _ => Task::none(),
     }
 }
 
-/// Reads the details of the Files entry shown in the preview, unless they are known.
-fn load_file_details(bar: &Bar) -> Task<Message> {
+/// Reads what the preview shows for the selected row, unless it is known: a Files entry's
+/// details or a Clipboard entry's content.
+fn load_preview(bar: &Bar) -> Task<Message> {
+    if bar.launcher.page() == launcher::Page::Clipboard {
+        return match launcher::selected_clip(&bar.launcher) {
+            Some(entry) if bar.launcher.decoded(entry.id).is_none() => {
+                let id = entry.id;
+                Task::perform(clipboard::decode(entry), move |decoded| Message::ClipboardDecoded(id, decoded))
+            }
+            _ => Task::none(),
+        };
+    }
     if bar.launcher.page() != launcher::Page::Files {
         return Task::none();
     }
