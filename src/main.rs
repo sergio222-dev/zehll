@@ -35,6 +35,7 @@ mod subpanel;
 mod system;
 mod theme;
 mod todo;
+mod trail;
 mod tray;
 mod workspaces;
 

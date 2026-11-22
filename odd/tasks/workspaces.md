@@ -18,7 +18,7 @@ Test runner: `cargo test`.
 |---|---|---|---|---|
 | T1 | S2, S3 | inline | done | artifact Main.dc.html v15 (no commit), approved |
 | T2 | S1, A1, A2 | inline | done | `feat: show each monitor's workspaces in its bar` (branch feat/workspaces-monitors) |
-| T3 | S3 | inline | done | next slice (branch feat/workspaces-trail) |
+| T3 | S3 | inline | done | `feat: trail the workspace indicator with a shader` (branch feat/workspaces-trail) |
 
 ## Log
 

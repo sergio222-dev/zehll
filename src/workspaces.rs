@@ -1,13 +1,14 @@
 //! Workspace indicator of each bar: the workspaces of its own monitor (hyprsplit gives each
 //! monitor a range of `PER_MONITOR` ids) as dots, the current one as an accent disc that slides
-//! to the new slot.
+//! to the new slot leaving a trail drawn by `trail.wgsl`.
 
 use std::time::{Duration, Instant};
 
-use iced::widget::{Row, Space, Stack, container};
+use iced::widget::{Row, Shader, Space, Stack, container};
 use iced::{Border, Color, Element, Length, Padding, Shadow};
 
 use crate::theme::Theme;
+use crate::trail::Trail;
 
 const DOT: f32 = 6.0;
 const DISC: f32 = 18.0;
@@ -114,6 +115,10 @@ pub fn view<'a, Message: 'a>(indicator: Option<&Indicator>, theme: Theme) -> Ele
     if let Some(indicator) = indicator {
         let frame = indicator.frame(Instant::now());
         let center = |position: f32| position * SLOT + SLOT / 2.0;
+        if frame.fade > 0.0 && (frame.head - frame.tail).abs() > 0.01 {
+            let trail = Trail { tail: center(frame.tail), head: center(frame.head), fade: frame.fade, color: theme.accent };
+            layers = layers.push(Shader::new(trail).width(Length::Fill).height(Length::Fill));
+        }
         let core = round(DOT, theme.bar_background, None);
         let glow = Shadow { color: Color { a: 0.45, ..theme.accent }, blur_radius: 8.0, ..Default::default() };
         let disc = container(round_with(core, DISC, theme.accent, Some(glow))).center_y(Length::Fill);
