@@ -1,0 +1,43 @@
+# App launcher
+
+Objective: bring the functionality of bnsplits/dotfiles' Quickshell launcher to Zehll (not a 1:1 port), designed first in the Zehll Bar Design canvas. Branch: `feat/launcher` (from `main`).
+Delivery: one commit per task, stacked to main (one PR per slice, each based on the previous branch). Test runner: `cargo test`.
+
+## Specs
+
+- S1 "me gusto mucho el launcher, podemos hacer una implementacion para la zehll?"; scope answer "Screenshot pages (Recommended)": Home/apps, Files, Clipboard, Keybinds, Calculator, opened with SUPER+SPACE. Commands and Web Search move to a later slice (not in this feature).
+- S2 "no se quiere un port 1 a 1, sino las funcionalidades": Zehll's own look and theme; upstream behaviour kept:
+  - Pages: Home is the root; the other pages open from Home items. Esc closes; Shift+Esc clears the search, else goes back a page, else closes. Enter primary action, Ctrl+Enter secondary. Up/Down, Tab/Shift+Tab, Ctrl+J/K and Ctrl+N/P move the selection; Ctrl+1..9 activates that row.
+  - Home: apps from `.desktop` files in the XDG data dirs (NoDisplay hidden), fuzzy matched on name, id and description; empty query shows suggestions; launch score per app (+0.01 per launch, halved every 14 days) added to the match score and persisted; Enter focuses an open window of the app or launches it (Terminal=true apps in a terminal); Ctrl+Enter runs the first desktop action.
+  - Files: empty query lists recent folders from `zoxide query -ls`; typing searches with `fd` (bounded depth and result count), boosted by the zoxide score; the selected entry shows a preview (folder icon, or text for readable files) and Name, Type, Size, Path, Items. Enter opens it with `xdg-open` and closes; Ctrl+Enter puts its path in the search (with `/` for folders).
+  - Clipboard: history from `cliphist list` with its count, filtered by the query; the selected entry shows its decoded text and Type, Mime, Date, Hash. Enter copies it back (`cliphist decode | wl-copy`) and closes; Ctrl+Enter pins or unpins it; the pin button toggles showing pinned entries; the row trash deletes the entry (`cliphist delete`); the clear button wipes the history.
+  - Keybinds: Hyprland binds with a description (`hyprctl binds -j`, no submap, no mouse binds), shown as `SUPER + SHIFT + E` and its description, fuzzy matched on both.
+  - Calculator: `qalc` on each keystroke; the result card shows the expression and the result; empty query lists history with each result, filtered by the query ("No matching history" when nothing matches). Enter copies the result with `wl-copy`, saves it to history (unique, max 25) and closes; Ctrl+Enter replaces the input with `(result)`; Tab walks the history.
+- S3 "cuando terminas habria que hacer el diseño en el artifact": design the launcher in the Zehll Bar Design artifact before writing code; the user approves it. References: the user's screenshots (L3).
+- Assumption (A1): Home also lists the power commands Lock, Suspend, Logout, Restart, Shutdown (upstream's Home commands; author-specific scripts left out), with a confirm step for Logout, Restart and Shutdown.
+- Assumption (A2): Clipboard pins are kept by Zehll in its own state file (upstream uses the author's `bnclip` wrapper); image entries show their type, size and an image preview.
+
+## Tasks
+
+| ID | Specs | Route | Status | Commit |
+|---|---|---|---|---|
+| T1 | S3 | inline | done | artifact Launcher.dc.html (no commit), approved |
+| T2 | S1, S2 | inline | done | launcher surface, SUPER+SPACE shortcut, search field, keyboard navigation |
+| T3 | S2, A1 | inline | pending | Home: desktop entries, fuzzy match, launch scores, launch/focus, power commands |
+| T4 | S2 | inline | pending | Keybinds page |
+| T5 | S2 | inline | pending | Calculator page |
+| T6 | S2 | inline | pending | Files page |
+| T7 | S2, A2 | inline | pending | Clipboard page |
+| T8 | S1 | inline | pending | README |
+
+Route: inline, no writer trigger (sequential units sharing `main.rs`). Forecast ~1500 changed lines: over 400, so ask the chain strategy before the commit that crosses it.
+
+## Log
+
+- L1 (2026-11-22) "puedes identificar que launcher de app usa este repo que tiene dotfiles? https://github.com/bnsplits/dotfiles"; then "me gusto mucho el launcher, podemos hacer una implementacion para la zehll?"; scope answer "Core first (Recommended)"; "no se quiere un port 1 a 1, sino las funcionalidades"; "cuando terminas habria que hacer el diseño en el artifact".
+- L2 Map: Zehll opens extra surfaces with `Message::NewLayerShell` (side panel pattern, `main.rs:1190-1239`); global shortcuts via Hyprland `global_shortcuts` in `shortcuts.rs`; `text_input` already used (todo, Wi-Fi password) but never auto-focused; no `KeyboardInteractivity::Exclusive` yet. Upstream has no input prefixes: pages are pushed from Home items or global shortcuts. Missing crates: fuzzy matching, desktop entry parsing; `qalc`, `wl-copy`, `xdg-open`, `curl` are installed.
+- L3 (2026-11-22) User screenshots of the upstream launcher as reference: "te dejo como se ve en esos dots para que tomes mejor referencia, apps, file and folder, clipboard, keys, calculator ... si la calculadora es muy compleja la podemos dejar para el despues". Artboard redone with six states: Home (one-line rows: name, description, APPLICATION tag), Files (zoxide recent folders + preview + Name/Type/Size/Path/Items), Clipboard (cliphist history count, pin/clear, row trash, preview + Type/Mime/Date/Hash), Keybinds (combo + description), Calculator history and result card (`900 days = 7.776E16 ns`, "No matching history"). Calculator is not complex: `qalc` does the math, Zehll only runs it and shows the output. Page scope pending the user's answer.
+- L4 (2026-11-22) Scope answer "Screenshot pages (Recommended)": Commands and Web Search leave this feature; Files, Clipboard and Keybinds join. Upstream checked: Files uses `zoxide query -ls` + `fd` (scripts/files_fetcher.py); Clipboard uses the author's `bnclip` (cliphist wrapper with pins); Keybinds filters Hyprland binds with `has_description`, no submap, no mouse. Installed here: `zoxide`, `cliphist`, `fd`; `hyprctl binds -j` returns 265 binds, 87 with a description.
+- L5 (2026-11-22) "aprobado": design approved, T1 done.
+- L6 T2 done: `src/launcher.rs` (pages, rows, navigation, view) and wiring in `main.rs`; `zehll:launcherToggle` in `shortcuts.rs`. Centered layer (no anchor) with `KeyboardInteractivity::Exclusive` and a click catcher; opening it closes the panel and the popovers, and opening the panel closes it. Keys come from `event::listen_with` because the search field captures Escape; the field is focused on `window::open_events` and again after each key. Home lists the four pages (substring match until T3 brings fuzzy matching); other pages are empty. RED 8/8, GREEN `cargo test` 70/70, clippy clean on the touched files. Live (next to ii, `hyprctl dispatch 'hl.dsp.global("zehll:launcherToggle")'`, keys with `wtype`): opens on the focused monitor 720x454, Down + Enter opened Clipboard, Shift+Esc went back to Home, typing `key` left only Keybinds, Esc closed both layers. The background looked see-through in screenshots but samples (9, 14, 33): `popup_background` at 0.96 like the other popovers. Assumption: the launcher opens fresh on Home each time (upstream keeps the page for 2 minutes after hiding).
+- L7 (2026-11-22) Chain strategy answer "Stacked to main (Recommended)". Slice 1: branch `feat/launcher-surface` (T2 and this document).

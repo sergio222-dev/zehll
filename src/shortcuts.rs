@@ -15,15 +15,17 @@ use wayland_protocols_hyprland::global_shortcuts::v1::client::hyprland_global_sh
 pub enum Shortcut {
     PanelToggle,
     MeetingTest,
+    LauncherToggle,
 }
 
 impl Shortcut {
-    const ALL: [Shortcut; 2] = [Shortcut::PanelToggle, Shortcut::MeetingTest];
+    const ALL: [Shortcut; 3] = [Shortcut::PanelToggle, Shortcut::MeetingTest, Shortcut::LauncherToggle];
 
     fn name(self) -> &'static str {
         match self {
             Shortcut::PanelToggle => "panelToggle",
             Shortcut::MeetingTest => "meetingTest",
+            Shortcut::LauncherToggle => "launcherToggle",
         }
     }
 
@@ -31,6 +33,7 @@ impl Shortcut {
         match self {
             Shortcut::PanelToggle => "Toggle the side panel",
             Shortcut::MeetingTest => "Show a test meeting alert",
+            Shortcut::LauncherToggle => "Toggle the app launcher",
         }
     }
 }

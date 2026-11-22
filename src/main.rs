@@ -10,6 +10,7 @@ mod flame;
 mod flashbang;
 mod hyprland;
 mod idle;
+mod launcher;
 mod media;
 mod meetings;
 mod mpris;
@@ -186,6 +187,9 @@ struct Bar {
     media_spectrum: Vec<f32>,
     // Flame burst around the media button: when playback last started or stopped, and which.
     media_flare: Option<(Instant, bool)>,
+    launcher: launcher::Launcher,
+    // Launcher surface and its click catcher.
+    launcher_surface: Option<OpenPanel>,
 }
 
 struct Popup {
@@ -199,6 +203,7 @@ enum Surface {
     Panel,
     Calendar,
     Media,
+    Launcher,
     MeetingAlerts,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
@@ -287,6 +292,8 @@ impl Bar {
             media_seek: None,
             media_spectrum: Vec::new(),
             media_flare: None,
+            launcher: launcher::Launcher::new(),
+            launcher_surface: None,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -413,6 +420,13 @@ enum Message {
     // Redraws the live wave of the player popover and the flame burst of the media button.
     MediaFrame,
     ReleaseMediaSeek,
+    WindowOpened(Id),
+    ToggleLauncher,
+    LauncherQuery(String),
+    LauncherNav(launcher::Nav),
+    LauncherActivate(usize),
+    // Rows to scroll and the list length.
+    LauncherScroll(i32, usize),
 }
 
 fn namespace() -> String {
@@ -441,6 +455,15 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
     let ring = match bar.meeting_alerts.is_empty() {
         true => Subscription::none(),
         false => time::every(alert::RING_INTERVAL).map(|_| Message::RingMeetingAlert),
+    };
+    // Every key press, even those the search field captures (it takes Escape), so navigation
+    // works while typing.
+    let launcher_keys = match bar.launcher_surface {
+        Some(_) => iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => launcher::nav(&key, modifiers).map(Message::LauncherNav),
+            _ => None,
+        }),
+        None => Subscription::none(),
     };
     let calendar_keys = match bar.calendar.is_some() || bar.media_popover.is_some() {
         true => keyboard::listen().map(Message::Key),
@@ -481,10 +504,13 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Subscription::run(shortcuts::events).map(|shortcut| match shortcut {
             shortcuts::Shortcut::PanelToggle => Message::TogglePanel,
             shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
+            shortcuts::Shortcut::LauncherToggle => Message::ToggleLauncher,
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
         window::close_events().map(Message::WindowClosed),
+        window::open_events().map(Message::WindowOpened),
+        launcher_keys,
         panel,
         calendar_keys,
         ring,
@@ -691,7 +717,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
         }
         // Sent by the click catcher, which the panel and the popovers use.
-        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar), close_media(bar)]),
+        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_launcher(bar)]),
         Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
             if bar.calendar.is_some() || bar.media_popover.is_some() {
                 return Task::batch([close_calendar(bar), close_media(bar)]);
@@ -811,6 +837,35 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::ToggleMedia => {
             return if bar.media_popover.is_some() { close_media(bar) } else { open_media(bar) };
         }
+        // The search field exists only once its surface is open, so it is focused then.
+        Message::WindowOpened(id) => {
+            if bar.launcher_surface.as_ref().is_some_and(|open| open.panel == id) {
+                return iced::widget::operation::focus(launcher::input_id());
+            }
+        }
+        Message::ToggleLauncher => {
+            return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar) };
+        }
+        Message::LauncherQuery(query) => bar.launcher.set_query(query),
+        Message::LauncherNav(nav) => {
+            let len = launcher::items(&bar.launcher).len();
+            match nav {
+                launcher::Nav::Close => return close_launcher(bar),
+                launcher::Nav::Back => {
+                    if !bar.launcher.back() {
+                        return close_launcher(bar);
+                    }
+                }
+                launcher::Nav::Move(delta) => bar.launcher.move_selection(delta, len),
+                launcher::Nav::Activate { .. } => return Task::batch([activate_launcher_item(bar, bar.launcher.selected), focus_launcher()]),
+                // Ctrl+1..9 counts the rows on screen.
+                launcher::Nav::Pick(row) => return Task::batch([activate_launcher_item(bar, bar.launcher.first + row), focus_launcher()]),
+            }
+            // Escape takes the focus from the search field.
+            return focus_launcher();
+        }
+        Message::LauncherActivate(index) => return Task::batch([activate_launcher_item(bar, index), focus_launcher()]),
+        Message::LauncherScroll(rows, len) => bar.launcher.scroll(rows, len),
         Message::Media(command) => {
             if let Some(player) = bar.media.clone() {
                 return Task::future(mpris::run(player, command)).discard();
@@ -1188,7 +1243,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
     let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
-    let close_calendar = close_calendar(bar);
+    let close_calendar = Task::batch([close_calendar(bar), close_launcher(bar)]);
     bar.uptime = system::uptime().unwrap_or_default();
     let month = panel::first_of_month(bar.now.date_naive());
     let fetch = match month == bar.calendar_month {
@@ -1306,6 +1361,61 @@ fn open_media(bar: &mut Bar) -> Task<Message> {
     Task::batch([close_panel(bar), close_calendar(bar), Task::done(Message::HideTooltip), task])
 }
 
+/// Opens the launcher centered on the focused monitor, on Home, closing every popover.
+fn open_launcher(bar: &mut Bar) -> Task<Message> {
+    let Some(output) = hyprland::focused_monitor() else {
+        return Task::none();
+    };
+    bar.launcher = launcher::Launcher::new();
+    let surface = NewLayerShellSettings {
+        size: Some((launcher::WIDTH, launcher::HEIGHT)),
+        layer: Layer::Overlay,
+        // No anchor centers it on the output.
+        anchor: Anchor::empty(),
+        exclusive_zone: Some(0),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
+        output_option: OutputOption::OutputName(output.clone()),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-launcher")),
+    };
+    let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
+    bar.surfaces.insert(open.catcher, Surface::Catcher);
+    bar.surfaces.insert(open.panel, Surface::Launcher);
+    let task = Task::done(Message::NewLayerShell {
+        settings: catcher_settings(output, "zehll-launcher-catcher"),
+        id: open.catcher,
+    })
+    .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }));
+    bar.launcher_surface = Some(open);
+    Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), Task::done(Message::HideTooltip), task])
+}
+
+fn close_launcher(bar: &mut Bar) -> Task<Message> {
+    let Some(open) = bar.launcher_surface.take() else {
+        return Task::none();
+    };
+    Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
+}
+
+fn focus_launcher() -> Task<Message> {
+    iced::widget::operation::focus(launcher::input_id())
+}
+
+/// Runs the action of the launcher row at `index`.
+fn activate_launcher_item(bar: &mut Bar, index: usize) -> Task<Message> {
+    let Some(item) = launcher::items(&bar.launcher).into_iter().nth(index) else {
+        return Task::none();
+    };
+    match item.action {
+        launcher::Action::Open(page) => bar.launcher.open(page),
+    }
+    Task::none()
+}
+
 fn close_media(bar: &mut Bar) -> Task<Message> {
     bar.media_seek = None;
     bar.media_spectrum.clear();
@@ -1360,6 +1470,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Panel) => return panel::view(bar),
         Some(Surface::Calendar) => return agenda::view(bar),
         Some(Surface::Media) => return media::view(bar),
+        Some(Surface::Launcher) => return launcher::view(bar),
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
