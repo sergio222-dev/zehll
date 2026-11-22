@@ -1853,7 +1853,13 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
 /// The workspaces of the monitor the bar `id` is on.
 fn workspace_indicator(bar: &Bar, id: Id) -> Element<'_, Message> {
     let name = bar.bars.get(&id);
-    workspaces::view(name.and_then(|name| bar.workspaces.get(name)), bar.theme)
+    let occupied = bar
+        .monitors
+        .iter()
+        .find(|monitor| Some(&monitor.name) == name)
+        .map(|monitor| workspaces::occupied_slots(&monitor.occupied))
+        .unwrap_or_default();
+    workspaces::view(name.and_then(|name| bar.workspaces.get(name)), occupied, bar.theme)
 }
 
 /// Next meeting beside the clock, or `SIGN IN` when the calendar token expired.

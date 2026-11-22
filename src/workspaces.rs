@@ -30,6 +30,15 @@ pub fn slot(workspace: i64) -> Option<usize> {
     (workspace >= 1).then(|| ((workspace - 1) % PER_MONITOR) as usize)
 }
 
+/// Which slots of a monitor have windows, from the ids of its workspaces with windows.
+pub fn occupied_slots(occupied: &[i64]) -> [bool; PER_MONITOR as usize] {
+    let mut slots = [false; PER_MONITOR as usize];
+    for slot in occupied.iter().filter_map(|id| slot(*id)) {
+        slots[slot] = true;
+    }
+    slots
+}
+
 /// Head and tail progress (0 to 1) and the trail's opacity, `elapsed` into a move.
 fn timing(elapsed: Duration) -> (f32, f32, f32) {
     let fraction = |of: Duration| (elapsed.as_secs_f32() / of.as_secs_f32()).clamp(0.0, 1.0);
@@ -101,15 +110,21 @@ impl Indicator {
     }
 }
 
-/// The dots of a monitor's workspaces with the disc on the current one; only dots when the
-/// monitor is unknown.
-pub fn view<'a, Message: 'a>(indicator: Option<&Indicator>, theme: Theme) -> Element<'a, Message> {
-    let dot = || {
-        container(round(DOT, theme.bracket, None))
-            .center_x(Length::Fixed(SLOT))
-            .center_y(Length::Fill)
+/// A monitor's workspaces, a dot each or a faint circle when it has windows, with the disc on
+/// the current one; no disc when the monitor is unknown.
+pub fn view<'a, Message: 'a>(
+    indicator: Option<&Indicator>,
+    occupied: [bool; PER_MONITOR as usize],
+    theme: Theme,
+) -> Element<'a, Message> {
+    let slot = |occupied: bool| {
+        let mark = match occupied {
+            true => round_with(round(DOT, mix(theme.accent, Color::WHITE, 0.7), None), DISC, Color { a: 0.22, ..theme.accent }, None),
+            false => round(DOT, theme.bracket, None),
+        };
+        container(mark).center_x(Length::Fixed(SLOT)).center_y(Length::Fill)
     };
-    let dots = Row::with_children((0..PER_MONITOR).map(|_| dot().into()));
+    let dots = Row::with_children(occupied.map(|occupied| slot(occupied).into()));
     let mut layers = Stack::new().width(Length::Fixed(SLOT * PER_MONITOR as f32)).height(Length::Fill).push(dots);
 
     if let Some(indicator) = indicator {
@@ -126,6 +141,11 @@ pub fn view<'a, Message: 'a>(indicator: Option<&Indicator>, theme: Theme) -> Ele
         layers = layers.push(container(disc).padding(Padding::ZERO.left(left)));
     }
     container(layers).padding(Padding::ZERO.left(LEADING)).height(Length::Fill).into()
+}
+
+fn mix(from: Color, to: Color, amount: f32) -> Color {
+    let channel = |a: f32, b: f32| a + (b - a) * amount;
+    Color::from_rgb(channel(from.r, to.r), channel(from.g, to.g), channel(from.b, to.b))
 }
 
 fn round<'a, Message: 'a>(size: f32, color: Color, shadow: Option<Shadow>) -> Element<'a, Message> {
@@ -160,6 +180,13 @@ mod tests {
         assert_eq!([1, 2, 3, 4, 5, 8, 11].map(slot), [0, 1, 2, 3, 0, 3, 2].map(Some));
         assert_eq!(slot(0), None);
         assert_eq!(slot(-98), None);
+    }
+
+    #[test]
+    fn workspaces_with_windows_mark_their_slot() {
+        assert_eq!(occupied_slots(&[5, 8]), [true, false, false, true]);
+        assert_eq!(occupied_slots(&[]), [false; 4]);
+        assert_eq!(occupied_slots(&[-98, 0]), [false; 4]);
     }
 
     #[test]

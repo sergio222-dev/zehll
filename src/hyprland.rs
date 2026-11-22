@@ -130,41 +130,64 @@ pub fn active_window_events() -> impl Stream<Item = ActiveWindow> {
     })
 }
 
-/// A monitor and the id of the workspace it shows.
+/// A monitor, the id of the workspace it shows and the ids of its workspaces with windows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Monitor {
     pub name: String,
     pub workspace: i64,
+    pub occupied: Vec<i64>,
 }
 
 /// Every enabled monitor.
 pub fn monitors() -> Vec<Monitor> {
-    request("j/monitors").map(|json| parse_monitors(&json)).unwrap_or_default()
+    let (Some(monitors), Some(workspaces)) = (request("j/monitors"), request("j/workspaces")) else {
+        return Vec::new();
+    };
+    parse_monitors(&monitors, &workspaces)
 }
 
-fn parse_monitors(json: &serde_json::Value) -> Vec<Monitor> {
-    let Some(monitors) = json.as_array() else {
+fn parse_monitors(json: &serde_json::Value, workspaces: &serde_json::Value) -> Vec<Monitor> {
+    let (Some(monitors), Some(workspaces)) = (json.as_array(), workspaces.as_array()) else {
         return Vec::new();
+    };
+    // Special workspaces have negative ids and are not part of the indicator.
+    let occupied = |name: &str| {
+        workspaces
+            .iter()
+            .filter(|workspace| workspace["monitor"].as_str() == Some(name) && workspace["windows"].as_u64().unwrap_or(0) > 0)
+            .filter_map(|workspace| workspace["id"].as_i64().filter(|id| *id > 0))
+            .collect()
     };
     monitors
         .iter()
         .filter_map(|monitor| {
+            let name = monitor["name"].as_str()?;
             Some(Monitor {
-                name: monitor["name"].as_str()?.to_owned(),
+                name: name.to_owned(),
                 workspace: monitor["activeWorkspace"]["id"].as_i64()?,
+                occupied: occupied(name),
             })
         })
         .collect()
 }
 
-/// Whether an event socket line can change the monitors or the workspace one of them shows.
+/// Whether an event socket line can change the monitors, the workspace one of them shows or
+/// which workspaces have windows.
 fn changes_monitors(line: &str) -> bool {
     let Some((event, _)) = line.split_once(">>") else {
         return false;
     };
     matches!(
         event.trim_end_matches("v2"),
-        "workspace" | "focusedmon" | "moveworkspace" | "monitoradded" | "monitorremoved"
+        "workspace"
+            | "focusedmon"
+            | "moveworkspace"
+            | "monitoradded"
+            | "monitorremoved"
+            | "openwindow"
+            | "closewindow"
+            | "movewindow"
+            | "destroyworkspace"
     )
 }
 
@@ -230,11 +253,18 @@ mod tests {
             { "id": 1, "name": "HDMI-A-2", "activeWorkspace": { "id": 5, "name": "5" }, "focused": true },
             { "id": 2, "name": "broken" },
         ]);
+        let workspaces = serde_json::json!([
+            { "id": 1, "monitor": "DP-1", "windows": 2 },
+            { "id": 2, "monitor": "DP-1", "windows": 0 },
+            { "id": 4, "monitor": "DP-1", "windows": 1 },
+            { "id": 6, "monitor": "HDMI-A-2", "windows": 3 },
+            { "id": -98, "name": "special:special", "monitor": "HDMI-A-2", "windows": 1 },
+        ]);
         assert_eq!(
-            parse_monitors(&json),
+            parse_monitors(&json, &workspaces),
             [
-                Monitor { name: "DP-1".into(), workspace: 2 },
-                Monitor { name: "HDMI-A-2".into(), workspace: 5 },
+                Monitor { name: "DP-1".into(), workspace: 2, occupied: vec![1, 4] },
+                Monitor { name: "HDMI-A-2".into(), workspace: 5, occupied: vec![6] },
             ]
         );
     }
@@ -248,10 +278,14 @@ mod tests {
             "moveworkspacev2>>3,3,HDMI-A-2",
             "monitoraddedv2>>2,DP-2,Dell",
             "monitorremovedv2>>2,DP-2,Dell",
+            "openwindow>>5a1b,6,kitty,zsh",
+            "closewindow>>5a1b",
+            "movewindowv2>>5a1b,4,4",
+            "destroyworkspacev2>>3,3",
         ] {
             assert!(changes_monitors(line), "{line}");
         }
-        for line in ["activewindow>>kitty,workspacev2>>1", "openwindow>>1,2,kitty,x", "workspacev"] {
+        for line in ["activewindow>>kitty,workspacev2>>1", "windowtitlev2>>5a1b,zsh", "workspacev"] {
             assert!(!changes_monitors(line), "{line}");
         }
     }
