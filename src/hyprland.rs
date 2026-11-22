@@ -21,11 +21,66 @@ fn socket_dir() -> Option<PathBuf> {
 
 /// Sends a JSON request (e.g. `j/activewindow`) to the Hyprland request socket.
 fn request(command: &str) -> Option<serde_json::Value> {
+    serde_json::from_str(&request_text(command)?).ok()
+}
+
+fn request_text(command: &str) -> Option<String> {
     let mut socket = StdUnixStream::connect(socket_dir()?.join(".socket.sock")).ok()?;
     socket.write_all(command.as_bytes()).ok()?;
     let mut reply = String::new();
     socket.read_to_string(&mut reply).ok()?;
-    serde_json::from_str(&reply).ok()
+    Some(reply)
+}
+
+/// Runs a dispatcher: `lua` for Lua configs, else the classic `legacy` form.
+fn dispatch(lua: &str, legacy: &str) -> bool {
+    let ok = |command: &str| request_text(&format!("dispatch {command}")).is_some_and(|reply| reply.trim() == "ok");
+    ok(lua) || ok(legacy)
+}
+
+/// Runs a shell command as a child of Hyprland, so it outlives the shell and gets its rules.
+pub fn exec(command: &str) -> bool {
+    dispatch(&format!("hl.dsp.exec_cmd({})", lua_string(command)), &format!("exec {command}"))
+}
+
+pub fn focus_window(address: &str) -> bool {
+    dispatch(&format!("hl.dsp.focus({{ window = \"address:{address}\" }})"), &format!("focuswindow address:{address}"))
+}
+
+/// Ends the Hyprland session.
+pub fn exit() -> bool {
+    dispatch("hl.dsp.exit()", "exit")
+}
+
+/// Every keybinding (`hyprctl binds -j`).
+pub fn binds() -> Option<serde_json::Value> {
+    request("j/binds")
+}
+
+/// Open windows as (address, class).
+pub fn clients() -> Vec<(String, String)> {
+    let Some(serde_json::Value::Array(clients)) = request("j/clients") else {
+        return Vec::new();
+    };
+    clients
+        .iter()
+        .filter_map(|client| Some((client["address"].as_str()?.to_owned(), client["class"].as_str()?.to_owned())))
+        .collect()
+}
+
+/// A Lua string literal holding `text`.
+fn lua_string(text: &str) -> String {
+    let mut literal = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '\\' => literal.push_str("\\\\"),
+            '"' => literal.push_str("\\\""),
+            '\n' => literal.push_str("\\n"),
+            c => literal.push(c),
+        }
+    }
+    literal.push('"');
+    literal
 }
 
 /// Queries the currently focused window.
@@ -88,4 +143,15 @@ pub fn cursor_x_on_focused_monitor() -> Option<i32> {
     let cursor = request("j/cursorpos")?["x"].as_i64()?;
     let monitor = focused_monitor_json()?["x"].as_i64()?;
     Some((cursor - monitor) as i32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lua_strings_escape_quotes_backslashes_and_newlines() {
+        assert_eq!(lua_string("kitty -e btop"), "\"kitty -e btop\"");
+        assert_eq!(lua_string("sh -c \"echo a\\b\"\n"), "\"sh -c \\\"echo a\\\\b\\\"\\n\"");
+    }
 }

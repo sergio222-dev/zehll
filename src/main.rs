@@ -1,15 +1,22 @@
 mod agenda;
 mod alert;
+mod apps;
 mod audio;
 mod bluetooth;
 mod brightness;
+mod calc;
+mod clipboard;
 mod calendar;
 mod cava;
 mod dbus;
+mod files;
 mod flame;
 mod flashbang;
+mod fuzzy;
 mod hyprland;
 mod idle;
+mod keybinds;
+mod launcher;
 mod media;
 mod meetings;
 mod mpris;
@@ -55,6 +62,8 @@ const BAR_PADDING: u16 = 16;
 const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 // calendarz's poll interval.
 const MEETINGS_POLL: Duration = Duration::from_secs(120);
+// Pause in typing before the Files page runs fd.
+const FILES_DEBOUNCE: Duration = Duration::from_millis(150);
 const PILL_BACKGROUND: Color = Color::from_rgb8(0x0d, 0x14, 0x30);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
@@ -186,6 +195,9 @@ struct Bar {
     media_spectrum: Vec<f32>,
     // Flame burst around the media button: when playback last started or stopped, and which.
     media_flare: Option<(Instant, bool)>,
+    launcher: launcher::Launcher,
+    // Launcher surface and its click catcher.
+    launcher_surface: Option<OpenPanel>,
 }
 
 struct Popup {
@@ -199,6 +211,7 @@ enum Surface {
     Panel,
     Calendar,
     Media,
+    Launcher,
     MeetingAlerts,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
@@ -287,6 +300,8 @@ impl Bar {
             media_seek: None,
             media_spectrum: Vec::new(),
             media_flare: None,
+            launcher: launcher::Launcher::load(),
+            launcher_surface: None,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -298,7 +313,8 @@ impl Bar {
             false => restore,
         };
         let restore = restore.chain(fetch_meetings(&bar));
-        (bar, restore)
+        // Loaded now too, so the first opening of the launcher already lists them.
+        (bar, Task::batch([restore, load_apps()]))
     }
 
     fn save_state(&self) {
@@ -413,6 +429,28 @@ enum Message {
     // Redraws the live wave of the player popover and the flame burst of the media button.
     MediaFrame,
     ReleaseMediaSeek,
+    WindowOpened(Id),
+    ToggleLauncher,
+    LauncherQuery(String),
+    LauncherNav(launcher::Nav),
+    LauncherActivate(usize),
+    LauncherApps(Vec<apps::App>),
+    // qalc's answer and the search it was computed for.
+    CalcAnswer(String, Option<calc::Answer>),
+    // Rows to scroll and the list length.
+    LauncherScroll(i32, usize),
+    FilesRecent(Vec<files::Entry>),
+    // A search whose debounce ended; it runs only if it is still the one shown.
+    FilesSearch(String),
+    // fd's results and the search they were computed for.
+    FilesFound(String, Vec<files::Entry>),
+    FileDetails(String, Option<files::Details>),
+    // A clipboard history read and the request number it answers.
+    ClipboardList(u64, Vec<clipboard::Entry>),
+    ClipboardDecoded(u64, Option<clipboard::Decoded>),
+    ClipboardDelete(clipboard::Entry),
+    ClipboardClear,
+    ClipboardPinnedOnly,
 }
 
 fn namespace() -> String {
@@ -441,6 +479,15 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
     let ring = match bar.meeting_alerts.is_empty() {
         true => Subscription::none(),
         false => time::every(alert::RING_INTERVAL).map(|_| Message::RingMeetingAlert),
+    };
+    // Every key press, even those the search field captures (it takes Escape), so navigation
+    // works while typing.
+    let launcher_keys = match bar.launcher_surface {
+        Some(_) => iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => launcher::nav(&key, modifiers).map(Message::LauncherNav),
+            _ => None,
+        }),
+        None => Subscription::none(),
     };
     let calendar_keys = match bar.calendar.is_some() || bar.media_popover.is_some() {
         true => keyboard::listen().map(Message::Key),
@@ -481,10 +528,13 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Subscription::run(shortcuts::events).map(|shortcut| match shortcut {
             shortcuts::Shortcut::PanelToggle => Message::TogglePanel,
             shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
+            shortcuts::Shortcut::LauncherToggle => Message::ToggleLauncher,
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
         window::close_events().map(Message::WindowClosed),
+        window::open_events().map(Message::WindowOpened),
+        launcher_keys,
         panel,
         calendar_keys,
         ring,
@@ -691,7 +741,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
         }
         // Sent by the click catcher, which the panel and the popovers use.
-        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar), close_media(bar)]),
+        Message::ClosePanel => return Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_launcher(bar)]),
         Message::Key(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
             if bar.calendar.is_some() || bar.media_popover.is_some() {
                 return Task::batch([close_calendar(bar), close_media(bar)]);
@@ -810,6 +860,96 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::ToggleMedia => {
             return if bar.media_popover.is_some() { close_media(bar) } else { open_media(bar) };
+        }
+        // The search field exists only once its surface is open, so it is focused then.
+        Message::WindowOpened(id) => {
+            if bar.launcher_surface.as_ref().is_some_and(|open| open.panel == id) {
+                return iced::widget::operation::focus(launcher::input_id());
+            }
+        }
+        Message::ToggleLauncher => {
+            return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar) };
+        }
+        Message::LauncherQuery(query) => return set_launcher_query(bar, query),
+        Message::CalcAnswer(query, answer) => bar.launcher.set_answer(query, answer),
+        Message::LauncherNav(nav) => {
+            let len = launcher::items(&bar.launcher).len();
+            match nav {
+                launcher::Nav::Close => return close_launcher(bar),
+                launcher::Nav::Back => {
+                    if !bar.launcher.back() {
+                        return close_launcher(bar);
+                    }
+                }
+                launcher::Nav::Move(delta) => {
+                    bar.launcher.move_selection(delta, len);
+                    return Task::batch([load_preview(bar), focus_launcher()]);
+                }
+                launcher::Nav::Activate { secondary } if bar.launcher.page() == launcher::Page::Calculator => {
+                    return calculator_enter(bar, secondary);
+                }
+                launcher::Nav::Activate { secondary } => return activate_launcher_item(bar, bar.launcher.selected, secondary),
+                // Ctrl+1..9 counts the rows on screen.
+                launcher::Nav::Pick(row) => return activate_launcher_item(bar, bar.launcher.first + row, false),
+            }
+            // Escape takes the focus from the search field.
+            return focus_launcher();
+        }
+        Message::LauncherActivate(index) => return activate_launcher_item(bar, index, false),
+        Message::LauncherApps(apps) => bar.launcher.apps = apps,
+        Message::LauncherScroll(rows, len) => bar.launcher.scroll(rows, len),
+        Message::FilesRecent(recent) => {
+            bar.launcher.recent = recent;
+            return load_preview(bar);
+        }
+        Message::FilesSearch(query) => {
+            if query == bar.launcher.query && bar.launcher.page() == launcher::Page::Files {
+                let home = bar.launcher.home.clone();
+                return Task::perform(files::search(query.clone(), home), move |found| Message::FilesFound(query.clone(), found));
+            }
+        }
+        Message::FilesFound(query, found) => {
+            bar.launcher.set_found(query, found);
+            return load_preview(bar);
+        }
+        Message::FileDetails(path, Some(details)) => bar.launcher.set_details(path, details),
+        Message::FileDetails(_, None) => {}
+        Message::ClipboardList(request, clips) => {
+            bar.launcher.set_clips(request, clips);
+            return load_preview(bar);
+        }
+        Message::ClipboardDecoded(id, Some(decoded)) => bar.launcher.set_decoded(id, decoded),
+        Message::ClipboardDecoded(_, None) => {}
+        Message::ClipboardDelete(entry) => {
+            bar.launcher.remove_clip(entry.id);
+            let request = bar.launcher.begin_clips();
+            let reload = Task::perform(
+                async move {
+                    clipboard::delete(entry).await;
+                    clipboard::list().await
+                },
+                move |clips| Message::ClipboardList(request, clips),
+            );
+            return Task::batch([reload, load_preview(bar), focus_launcher()]);
+        }
+        Message::ClipboardClear => {
+            if !bar.launcher.confirm_clear() {
+                return focus_launcher();
+            }
+            bar.launcher.clear_clips();
+            let request = bar.launcher.begin_clips();
+            let reload = Task::perform(
+                async {
+                    clipboard::wipe().await;
+                    clipboard::list().await
+                },
+                move |clips| Message::ClipboardList(request, clips),
+            );
+            return Task::batch([reload, focus_launcher()]);
+        }
+        Message::ClipboardPinnedOnly => {
+            bar.launcher.toggle_pinned_only();
+            return Task::batch([load_preview(bar), focus_launcher()]);
         }
         Message::Media(command) => {
             if let Some(player) = bar.media.clone() {
@@ -1188,7 +1328,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
     let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
-    let close_calendar = close_calendar(bar);
+    let close_calendar = Task::batch([close_calendar(bar), close_launcher(bar)]);
     bar.uptime = system::uptime().unwrap_or_default();
     let month = panel::first_of_month(bar.now.date_naive());
     let fetch = match month == bar.calendar_month {
@@ -1306,6 +1446,197 @@ fn open_media(bar: &mut Bar) -> Task<Message> {
     Task::batch([close_panel(bar), close_calendar(bar), Task::done(Message::HideTooltip), task])
 }
 
+/// Opens the launcher centered on the focused monitor, on Home, closing every popover.
+fn open_launcher(bar: &mut Bar) -> Task<Message> {
+    let Some(output) = hyprland::focused_monitor() else {
+        return Task::none();
+    };
+    bar.launcher.reset();
+    bar.launcher.now = Local::now().timestamp();
+    bar.launcher.running = hyprland::clients().into_iter().map(|(_, class)| class).collect();
+    let surface = NewLayerShellSettings {
+        size: Some((launcher::WIDTH, launcher::HEIGHT)),
+        layer: Layer::Overlay,
+        // No anchor centers it on the output.
+        anchor: Anchor::empty(),
+        exclusive_zone: Some(0),
+        margin: None,
+        keyboard_interactivity: KeyboardInteractivity::Exclusive,
+        output_option: OutputOption::OutputName(output.clone()),
+        events_transparent: false,
+        namespace: Some(String::from("zehll-launcher")),
+    };
+    let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
+    bar.surfaces.insert(open.catcher, Surface::Catcher);
+    bar.surfaces.insert(open.panel, Surface::Launcher);
+    let task = Task::done(Message::NewLayerShell {
+        settings: catcher_settings(output, "zehll-launcher-catcher"),
+        id: open.catcher,
+    })
+    .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }));
+    bar.launcher_surface = Some(open);
+    Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), Task::done(Message::HideTooltip), task, load_apps()])
+}
+
+/// Reads the installed apps off the UI thread; the launcher keeps the previous list meanwhile.
+fn load_apps() -> Task<Message> {
+    Task::perform(async { tokio::task::spawn_blocking(apps::load).await.unwrap_or_default() }, Message::LauncherApps)
+}
+
+fn close_launcher(bar: &mut Bar) -> Task<Message> {
+    let Some(open) = bar.launcher_surface.take() else {
+        return Task::none();
+    };
+    Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
+}
+
+fn focus_launcher() -> Task<Message> {
+    iced::widget::operation::focus(launcher::input_id())
+}
+
+/// Runs the action of the launcher row at `index`; `secondary` is Ctrl+Enter.
+fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<Message> {
+    let Some(item) = launcher::items(&bar.launcher).into_iter().nth(index) else {
+        return focus_launcher();
+    };
+    match item.action {
+        launcher::Action::None => focus_launcher(),
+        launcher::Action::Recall(index) => match bar.launcher.history.get(index) {
+            Some(entry) => Task::batch([set_launcher_query(bar, entry.input.clone()), focus_launcher()]),
+            None => focus_launcher(),
+        },
+        launcher::Action::Open(page) => {
+            if page == launcher::Page::Keybinds {
+                bar.launcher.keybinds = keybinds::load();
+            }
+            bar.launcher.open(page);
+            match page {
+                launcher::Page::Files => Task::batch([Task::perform(files::recent(), Message::FilesRecent), focus_launcher()]),
+                launcher::Page::Clipboard => {
+                    let request = bar.launcher.begin_clips();
+                    Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
+                }
+                _ => focus_launcher(),
+            }
+        }
+        launcher::Action::App(index) => {
+            let Some(app) = bar.launcher.apps.get(index).cloned() else {
+                return focus_launcher();
+            };
+            launch_app(&app, secondary);
+            apps::bump(&mut bar.launcher.scores, &app.id, Local::now().timestamp());
+            apps::save_scores(&bar.launcher.scores);
+            close_launcher(bar)
+        }
+        launcher::Action::Power(power) => {
+            if !bar.launcher.confirm(power) {
+                return focus_launcher();
+            }
+            let ran = match power.command() {
+                Some(command) => hyprland::exec(command),
+                None => hyprland::exit(),
+            };
+            if !ran {
+                eprintln!("zehll: cannot run {power:?}");
+            }
+            close_launcher(bar)
+        }
+        launcher::Action::File(entry) if secondary => Task::batch([set_launcher_query(bar, files::path_text(&entry)), focus_launcher()]),
+        launcher::Action::File(entry) => {
+            if !hyprland::exec(&format!("xdg-open {}", files::shell_quote(&entry.path))) {
+                eprintln!("zehll: cannot open {}", entry.path);
+            }
+            close_launcher(bar)
+        }
+        launcher::Action::Clip(entry) if secondary => {
+            bar.launcher.toggle_pin(&entry);
+            clipboard::save_pins(&bar.launcher.pins);
+            Task::batch([load_preview(bar), focus_launcher()])
+        }
+        launcher::Action::Clip(entry) => Task::batch([Task::future(clipboard::copy_entry(entry)).discard(), close_launcher(bar)]),
+    }
+}
+
+/// Sets the launcher search; on the Calculator page qalc evaluates it, on the Files page fd
+/// searches it once typing pauses.
+fn set_launcher_query(bar: &mut Bar, query: String) -> Task<Message> {
+    bar.launcher.set_query(query.clone());
+    if query.trim().is_empty() {
+        return load_preview(bar);
+    }
+    match bar.launcher.page() {
+        launcher::Page::Calculator => Task::perform(calc::evaluate(query.clone()), move |answer| Message::CalcAnswer(query.clone(), answer)),
+        launcher::Page::Files => Task::batch([
+            load_preview(bar),
+            Task::perform(tokio::time::sleep(FILES_DEBOUNCE), move |()| Message::FilesSearch(query.clone())),
+        ]),
+        _ => Task::none(),
+    }
+}
+
+/// Reads what the preview shows for the selected row, unless it is known: a Files entry's
+/// details or a Clipboard entry's content.
+fn load_preview(bar: &Bar) -> Task<Message> {
+    if bar.launcher.page() == launcher::Page::Clipboard {
+        return match launcher::selected_clip(&bar.launcher) {
+            Some(entry) if bar.launcher.decoded(entry.id).is_none() => {
+                let id = entry.id;
+                Task::perform(clipboard::decode(entry), move |decoded| Message::ClipboardDecoded(id, decoded))
+            }
+            _ => Task::none(),
+        };
+    }
+    if bar.launcher.page() != launcher::Page::Files {
+        return Task::none();
+    }
+    match launcher::selected_file(&bar.launcher) {
+        Some(entry) if bar.launcher.details(&entry.path).is_none() => {
+            let path = entry.path;
+            Task::perform(files::details(path.clone()), move |details| Message::FileDetails(path.clone(), details))
+        }
+        _ => Task::none(),
+    }
+}
+
+/// Enter copies the answer and remembers it, or recalls the picked past calculation;
+/// Ctrl+Enter puts the answer back in the search.
+fn calculator_enter(bar: &mut Bar, secondary: bool) -> Task<Message> {
+    if secondary {
+        let Some(result) = bar.launcher.answer().map(|answer| answer.result.clone()) else {
+            return focus_launcher();
+        };
+        return Task::batch([set_launcher_query(bar, format!("({result})")), focus_launcher()]);
+    }
+    match launcher::calculator_enter(&bar.launcher) {
+        launcher::CalcEnter::Copy(answer) => {
+            let entry = calc::Entry { input: bar.launcher.query.clone(), result: answer.result.clone() };
+            calc::remember(&mut bar.launcher.history, entry);
+            calc::save_history(&bar.launcher.history);
+            Task::batch([Task::future(clipboard::copy(answer.result)).discard(), close_launcher(bar)])
+        }
+        launcher::CalcEnter::Recall(input) => Task::batch([set_launcher_query(bar, input), focus_launcher()]),
+        launcher::CalcEnter::Nothing => focus_launcher(),
+    }
+}
+
+/// Focuses an open window of `app`, else starts it; `secondary` starts its first desktop action.
+fn launch_app(app: &apps::App, secondary: bool) {
+    let window = match secondary {
+        true => None,
+        false => hyprland::clients().into_iter().find(|(_, class)| apps::owns_window(app, class)),
+    };
+    let done = match window {
+        Some((address, _)) => hyprland::focus_window(&address),
+        None => hyprland::exec(&apps::launch_command(app, secondary, &apps::terminal())),
+    };
+    if !done {
+        eprintln!("zehll: cannot launch {}", app.id);
+    }
+}
+
 fn close_media(bar: &mut Bar) -> Task<Message> {
     bar.media_seek = None;
     bar.media_spectrum.clear();
@@ -1360,6 +1691,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Panel) => return panel::view(bar),
         Some(Surface::Calendar) => return agenda::view(bar),
         Some(Surface::Media) => return media::view(bar),
+        Some(Surface::Launcher) => return launcher::view(bar),
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
