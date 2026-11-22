@@ -9,7 +9,7 @@ use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Radians, R
 use crate::usage::{self, Disk, HOT};
 use crate::{
     BODY_FONT, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, Message, PILL_BACKGROUND, Tooltip, glow_style, icon_sized,
-    slanted, system,
+    panel_style, slanted, system,
 };
 
 pub const WIDTH: u32 = 760;
@@ -103,7 +103,7 @@ pub fn tooltip(bar: &Bar) -> Element<'_, Message> {
         .padding([12, 16])
         .width(Length::Fill)
         .height(Length::Fill)
-        .style(move |_| opaque(theme))
+        .style(move |_| panel_style(theme))
         .into()
 }
 
@@ -176,16 +176,7 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     ]
     .spacing(12)
     .padding(Padding::ZERO.bottom(16.0));
-    container(body).width(Length::Fill).height(Length::Fill).style(move |_| opaque(theme)).into()
-}
-
-/// The popover look without its slight transparency, like the sub-panels.
-fn opaque(theme: crate::theme::Theme) -> container::Style {
-    container::Style {
-        background: Some(Color { a: 1.0, ..theme.popup_background }.into()),
-        border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
-        ..Default::default()
-    }
+    container(body).width(Length::Fill).height(Length::Fill).style(move |_| panel_style(theme)).into()
 }
 
 /// Section title strip, like the panel's.

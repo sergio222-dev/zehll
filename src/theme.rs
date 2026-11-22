@@ -25,7 +25,7 @@ impl Default for Theme {
         Self {
             bar_background: Color::from_rgb8(0x07, 0x0c, 0x1d),
             bar_border: Color::from_rgb8(0x1c, 0x28, 0x46),
-            popup_background: Color::from_rgba8(0x09, 0x0e, 0x20, 0.96),
+            popup_background: Color::from_rgb8(0x09, 0x0e, 0x20),
             border: Color::from_rgb8(0x22, 0x30, 0x4f),
             section_background: Color::from_rgb8(0x15, 0x20, 0x39),
             bracket: Color::from_rgb8(0x5d, 0x6b, 0x8f),
