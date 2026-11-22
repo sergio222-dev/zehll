@@ -4,6 +4,8 @@ mod apps;
 mod audio;
 mod bluetooth;
 mod brightness;
+mod calc;
+mod clipboard;
 mod calendar;
 mod cava;
 mod dbus;
@@ -295,7 +297,7 @@ impl Bar {
             media_seek: None,
             media_spectrum: Vec::new(),
             media_flare: None,
-            launcher: launcher::Launcher::with_scores(apps::load_scores()),
+            launcher: launcher::Launcher::load(),
             launcher_surface: None,
         };
         let restore = match state.keep_awake {
@@ -430,6 +432,8 @@ enum Message {
     LauncherNav(launcher::Nav),
     LauncherActivate(usize),
     LauncherApps(Vec<apps::App>),
+    // qalc's answer and the search it was computed for.
+    CalcAnswer(String, Option<calc::Answer>),
     // Rows to scroll and the list length.
     LauncherScroll(i32, usize),
 }
@@ -851,7 +855,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::ToggleLauncher => {
             return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar) };
         }
-        Message::LauncherQuery(query) => bar.launcher.set_query(query),
+        Message::LauncherQuery(query) => return set_launcher_query(bar, query),
+        Message::CalcAnswer(query, answer) => bar.launcher.set_answer(query, answer),
         Message::LauncherNav(nav) => {
             let len = launcher::items(&bar.launcher).len();
             match nav {
@@ -862,6 +867,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                     }
                 }
                 launcher::Nav::Move(delta) => bar.launcher.move_selection(delta, len),
+                launcher::Nav::Activate { secondary } if bar.launcher.page() == launcher::Page::Calculator => {
+                    return calculator_enter(bar, secondary);
+                }
                 launcher::Nav::Activate { secondary } => return activate_launcher_item(bar, bar.launcher.selected, secondary),
                 // Ctrl+1..9 counts the rows on screen.
                 launcher::Nav::Pick(row) => return activate_launcher_item(bar, bar.launcher.first + row, false),
@@ -1425,6 +1433,10 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
     };
     match item.action {
         launcher::Action::None => focus_launcher(),
+        launcher::Action::Recall(index) => match bar.launcher.history.get(index) {
+            Some(entry) => Task::batch([set_launcher_query(bar, entry.input.clone()), focus_launcher()]),
+            None => focus_launcher(),
+        },
         launcher::Action::Open(page) => {
             if page == launcher::Page::Keybinds {
                 bar.launcher.keybinds = keybinds::load();
@@ -1454,6 +1466,36 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
             }
             close_launcher(bar)
         }
+    }
+}
+
+/// Sets the launcher search; on the Calculator page qalc evaluates it.
+fn set_launcher_query(bar: &mut Bar, query: String) -> Task<Message> {
+    bar.launcher.set_query(query.clone());
+    if bar.launcher.page() != launcher::Page::Calculator || query.trim().is_empty() {
+        return Task::none();
+    }
+    Task::perform(calc::evaluate(query.clone()), move |answer| Message::CalcAnswer(query.clone(), answer))
+}
+
+/// Enter copies the answer and remembers it, or recalls the picked past calculation;
+/// Ctrl+Enter puts the answer back in the search.
+fn calculator_enter(bar: &mut Bar, secondary: bool) -> Task<Message> {
+    if secondary {
+        let Some(result) = bar.launcher.answer().map(|answer| answer.result.clone()) else {
+            return focus_launcher();
+        };
+        return Task::batch([set_launcher_query(bar, format!("({result})")), focus_launcher()]);
+    }
+    match launcher::calculator_enter(&bar.launcher) {
+        launcher::CalcEnter::Copy(answer) => {
+            let entry = calc::Entry { input: bar.launcher.query.clone(), result: answer.result.clone() };
+            calc::remember(&mut bar.launcher.history, entry);
+            calc::save_history(&bar.launcher.history);
+            Task::batch([Task::future(clipboard::copy(answer.result)).discard(), close_launcher(bar)])
+        }
+        launcher::CalcEnter::Recall(input) => Task::batch([set_launcher_query(bar, input), focus_launcher()]),
+        launcher::CalcEnter::Nothing => focus_launcher(),
     }
 }
 

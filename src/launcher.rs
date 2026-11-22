@@ -4,11 +4,11 @@ use std::collections::HashMap;
 
 use iced::keyboard::{self, Modifiers, key::Named};
 use iced::widget::{self, Column, Row, Space, Stack, button, column, container, image, mouse_area, row, svg, text, text_input};
-use iced::{Alignment, Border, Color, Element, Length, Padding, mouse};
+use iced::{Alignment, Border, Color, Element, Font, Length, Padding, mouse};
 
 use crate::apps::{self, App, Score};
 use crate::keybinds::Keybind;
-use crate::{fuzzy, tray};
+use crate::{calc, fuzzy, tray};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
@@ -19,6 +19,9 @@ const SECTION_HEIGHT: f32 = 34.0;
 const LIST_PADDING: f32 = 8.0;
 const FOOTER_HEIGHT: f32 = 34.0;
 const APP_ICON: f32 = 22.0;
+const CARD_HEIGHT: f32 = 120.0;
+// List rows the calculator's result card takes the place of.
+const CARD_ROWS: usize = 3;
 // Open-window marker, the green of the media player's source tag.
 const RUNNING: Color = Color::from_rgb8(0x5f, 0xe3, 0x9a);
 pub const WIDTH: u32 = 720;
@@ -157,6 +160,8 @@ pub enum Action {
     /// Rows only shown, like keybindings.
     None,
     Open(Page),
+    /// Index into `Launcher::history`.
+    Recall(usize),
     /// Index into `Launcher::apps`.
     App(usize),
     Power(Power),
@@ -175,6 +180,37 @@ pub enum TitleStyle {
     Body,
     /// Key combinations, in condensed capitals.
     Keys,
+    /// Calculations, in monospace with the result as the tag.
+    Mono,
+}
+
+/// What Enter does on the Calculator page.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CalcEnter {
+    /// Copy the answer and remember it.
+    Copy(calc::Answer),
+    /// Put a past calculation back in the search.
+    Recall(String),
+    Nothing,
+}
+
+pub fn calculator_enter(launcher: &Launcher) -> CalcEnter {
+    let picked = || match items(launcher).into_iter().nth(launcher.selected).map(|item| item.action) {
+        Some(Action::Recall(index)) => launcher.history.get(index).map(|entry| CalcEnter::Recall(entry.input.clone())),
+        _ => None,
+    };
+    match (launcher.answer(), launcher.moved) {
+        (Some(answer), false) => CalcEnter::Copy(answer.clone()),
+        _ => picked().unwrap_or(CalcEnter::Nothing),
+    }
+}
+
+/// Text shown when a page has no rows.
+pub fn empty_text(page: Page) -> &'static str {
+    match page {
+        Page::Calculator => "NO MATCHING HISTORY",
+        Page::Home | Page::Files | Page::Clipboard | Page::Keybinds => "NO RESULTS",
+    }
 }
 
 /// One row of the launcher list.
@@ -197,8 +233,33 @@ pub fn items(launcher: &Launcher) -> Vec<Item> {
     match launcher.page() {
         Page::Home => home_items(launcher),
         Page::Keybinds => keybind_items(launcher),
-        Page::Files | Page::Clipboard | Page::Calculator => Vec::new(),
+        Page::Calculator => history_items(launcher),
+        Page::Files | Page::Clipboard => Vec::new(),
     }
+}
+
+/// Past calculations, or those matching the search by input or result, best first.
+fn history_items(launcher: &Launcher) -> Vec<Item> {
+    let mut ranked: Vec<(f32, Item)> = launcher
+        .history
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let score = [&entry.input, &entry.result].iter().filter_map(|field| fuzzy::score(&launcher.query, field)).reduce(f32::max)?;
+            let item = Item {
+                icon: ItemIcon::Symbol("history"),
+                title: entry.input.clone(),
+                title_style: TitleStyle::Mono,
+                description: String::new(),
+                tag: entry.result.clone(),
+                running: false,
+                action: Action::Recall(index),
+            };
+            Some((score, item))
+        })
+        .collect();
+    ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+    ranked.into_iter().map(|(_, item)| item).collect()
 }
 
 /// Every described keybinding, or those matching the search by keys or description, best first.
@@ -282,6 +343,7 @@ pub fn section(launcher: &Launcher, count: usize) -> String {
     match (launcher.page(), launcher.query.is_empty()) {
         (Page::Home, true) => String::from("SUGGESTIONS"),
         (Page::Keybinds, true) => String::from("KEYBINDS"),
+        (Page::Calculator, _) => String::from("HISTORY"),
         _ => format!("RESULTS ({count})"),
     }
 }
@@ -291,7 +353,8 @@ pub fn hints(page: Page) -> &'static [(&'static str, &'static str)] {
     match page {
         Page::Home => &[("↵", "open"), ("^↵", "action"), ("^1–9", "pick"), ("ESC", "close")],
         Page::Keybinds => &[("↑↓", "move"), ("⇧ESC", "back"), ("ESC", "close")],
-        Page::Files | Page::Clipboard | Page::Calculator => &[("↵", "open"), ("⇧ESC", "back"), ("ESC", "close")],
+        Page::Calculator => &[("↵", "copy"), ("^↵", "reuse"), ("TAB", "history"), ("⇧ESC", "back")],
+        Page::Files | Page::Clipboard => &[("↵", "open"), ("⇧ESC", "back"), ("ESC", "close")],
     }
 }
 
@@ -338,9 +401,15 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     let header = container(text(section(launcher, len)).font(CONDENSED_BOLD).size(12).color(theme.text_muted))
         .padding(Padding { top: 12.0, right: 18.0, bottom: 6.0, left: 18.0 });
     let list: Element<'_, Message> = match items.is_empty() {
-        true => container(text("NO RESULTS").font(CONDENSED_BOLD).size(14).color(theme.text_muted)).center(Length::Fill).into(),
+        true => {
+            let empty = text(empty_text(page)).font(CONDENSED_BOLD).size(14).color(theme.text_muted);
+            match page {
+                Page::Calculator => container(column![icon_colored("calculate", 40.0, theme.text_dim), empty].spacing(10).align_x(Alignment::Center)).center(Length::Fill).into(),
+                _ => container(empty).center(Length::Fill).into(),
+            }
+        }
         false => {
-            let rows = items.into_iter().enumerate().skip(launcher.first).take(VISIBLE_ROWS);
+            let rows = items.into_iter().enumerate().skip(launcher.first).take(launcher.visible_rows());
             let rows = Column::with_children(rows.map(|(index, item)| item_row(theme, item, index, index == launcher.selected)));
             mouse_area(container(rows).height(Length::Fill))
                 .on_scroll(move |delta| {
@@ -353,7 +422,10 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
                 .into()
         }
     };
-    let body = column![header, list].height(Length::Fill);
+    let body: Element<'_, Message> = match launcher.answer().filter(|_| page == Page::Calculator) {
+        Some(answer) => column![answer_card(theme, answer), header, list].height(Length::Fill).into(),
+        None => column![header, list].height(Length::Fill).into(),
+    };
 
     let hints = Row::with_children(hints(page).iter().map(|(key, label)| {
         let key = container(text(*key).font(CONDENSED_BOLD).size(12).color(theme.text)).padding([1, 6]).style(move |_| container::Style {
@@ -379,6 +451,28 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         .into()
 }
 
+/// The expression as qalc read it, then the result, as in the design's result card.
+fn answer_card(theme: crate::theme::Theme, answer: &calc::Answer) -> Element<'_, Message> {
+    let side = |content: String, color: Color| {
+        container(text(content).font(CONDENSED_BOLD).size(30).color(color).wrapping(text::Wrapping::None)).center_x(Length::Fill).center_y(Length::Fill).clip(true)
+    };
+    let sign = container(text(answer.sign).font(CONDENSED_BOLD).size(26).color(theme.text_muted)).center(44).style(move |_| container::Style {
+        border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    });
+    let card = row![side(answer.expression.clone(), theme.text), container(sign).height(Length::Fill).center_y(Length::Fill), side(answer.result.clone(), theme.accent)]
+        .height(Length::Fill)
+        .align_y(Alignment::Center);
+    container(container(card).height(Length::Fill).style(move |_| container::Style {
+        background: Some(theme.section_background.into()),
+        border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
+        ..Default::default()
+    }))
+    .padding(Padding { top: 16.0, right: 16.0, bottom: 0.0, left: 16.0 })
+    .height(CARD_HEIGHT + 16.0)
+    .into()
+}
+
 fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: bool) -> Element<'a, Message> {
     let icon_color = if selected { theme.glow } else { theme.text };
     let icon: Element<'a, Message> = match item.icon {
@@ -398,6 +492,7 @@ fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: 
         match item.title_style {
             TitleStyle::Body => text(item.title).font(BODY_BOLD).size(15),
             TitleStyle::Keys => text(item.title).font(CONDENSED_BOLD).size(16),
+            TitleStyle::Mono => text(item.title).font(Font::MONOSPACE).size(14),
         }
         .wrapping(text::Wrapping::None),
         container(text(item.description).font(BODY_FONT).size(12).color(theme.text_muted).wrapping(text::Wrapping::None))
@@ -407,6 +502,7 @@ fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: 
             // A keybinding's description reads as text, not as a label.
             TitleStyle::Keys => text(item.tag).font(BODY_FONT).size(13).color(theme.text_muted),
             TitleStyle::Body => text(item.tag).font(CONDENSED_BOLD).size(12).color(theme.text_muted),
+            TitleStyle::Mono => text(item.tag).font(CONDENSED_BOLD).size(17).color(theme.text),
         },
     ]
     .spacing(12)
@@ -449,6 +545,12 @@ pub struct Launcher {
     pub scores: HashMap<String, Score>,
     /// Described Hyprland binds, read when the Keybinds page opens.
     pub keybinds: Vec<Keybind>,
+    /// Past calculations, newest first.
+    pub history: Vec<calc::Entry>,
+    /// Latest qalc answer and the search it was computed for.
+    answer: Option<(String, calc::Answer)>,
+    /// The selection was moved since the last search, so Enter acts on the row.
+    moved: bool,
     /// Classes of the open windows, read when the launcher opens.
     pub running: Vec<String>,
     /// Unix seconds when the launcher opened, for decaying launch scores.
@@ -467,14 +569,38 @@ impl Launcher {
             apps: Vec::new(),
             scores: HashMap::new(),
             keybinds: Vec::new(),
+            history: Vec::new(),
+            answer: None,
+            moved: false,
             running: Vec::new(),
             now: 0,
             confirm: None,
         }
     }
 
-    pub fn with_scores(scores: HashMap<String, Score>) -> Self {
-        Self { scores, ..Self::new() }
+    /// With the saved launch scores and calculator history.
+    pub fn load() -> Self {
+        Self { scores: apps::load_scores(), history: calc::load_history(), ..Self::new() }
+    }
+
+    /// The calculator's answer, if it is for the current search.
+    pub fn answer(&self) -> Option<&calc::Answer> {
+        self.answer.as_ref().filter(|(query, _)| *query == self.query).map(|(_, answer)| answer)
+    }
+
+    /// Stores qalc's answer for `query`, dropping answers to older searches that arrive late.
+    pub fn set_answer(&mut self, query: String, answer: Option<calc::Answer>) {
+        if query == self.query {
+            self.answer = answer.map(|answer| (query, answer));
+        }
+    }
+
+    /// Rows that fit under the search, fewer under the calculator's result card.
+    pub fn visible_rows(&self) -> usize {
+        match self.page() == Page::Calculator && self.answer().is_some() {
+            true => VISIBLE_ROWS - CARD_ROWS,
+            false => VISIBLE_ROWS,
+        }
     }
 
     /// Back to an empty Home, keeping the loaded apps and scores.
@@ -507,6 +633,7 @@ impl Launcher {
         self.selected = 0;
         self.first = 0;
         self.confirm = None;
+        self.moved = false;
     }
 
     /// Clears the search, else goes back a page. False when there is nothing to undo.
@@ -523,6 +650,8 @@ impl Launcher {
     /// Moves the selection, wrapping at both ends, and scrolls to keep it visible.
     pub fn move_selection(&mut self, delta: i32, len: usize) {
         self.confirm = None;
+        self.moved = true;
+        let visible = self.visible_rows();
         if len == 0 {
             self.selected = 0;
             self.first = 0;
@@ -531,14 +660,14 @@ impl Launcher {
         self.selected = (self.selected as i64 + delta as i64).rem_euclid(len as i64) as usize;
         if self.selected < self.first {
             self.first = self.selected;
-        } else if self.selected >= self.first + VISIBLE_ROWS {
-            self.first = self.selected + 1 - VISIBLE_ROWS;
+        } else if self.selected >= self.first + visible {
+            self.first = self.selected + 1 - visible;
         }
     }
 
     /// Scrolls by whole rows without moving past the list.
     pub fn scroll(&mut self, rows: i32, len: usize) {
-        let last = len.saturating_sub(VISIBLE_ROWS) as i64;
+        let last = len.saturating_sub(self.visible_rows()) as i64;
         self.first = (self.first as i64 + rows as i64).clamp(0, last) as usize;
     }
 }
@@ -749,6 +878,63 @@ mod tests {
         launcher.set_query(String::from("super space"));
         assert_eq!(titles(&launcher), ["SUPER + SPACE"]);
         assert_eq!(section(&launcher, 1), "RESULTS (1)");
+    }
+
+    fn calculator() -> Launcher {
+        let mut launcher = Launcher::new();
+        launcher.history = vec![
+            calc::Entry { input: String::from("4 * 22 + 1"), result: String::from("89") },
+            calc::Entry { input: String::from("500ns to ms"), result: String::from("0.0005 ms") },
+        ];
+        launcher.open(Page::Calculator);
+        launcher
+    }
+
+    fn answer(result: &str) -> calc::Answer {
+        calc::Answer { expression: String::from("900 days"), sign: "=", result: result.to_string() }
+    }
+
+    #[test]
+    fn the_calculator_lists_past_calculations_matching_the_search() {
+        let mut launcher = calculator();
+        assert_eq!((section(&launcher, 2).as_str(), titles(&launcher)), ("HISTORY", vec![String::from("4 * 22 + 1"), String::from("500ns to ms")]));
+        let first = &items(&launcher)[0];
+        assert_eq!((first.tag.as_str(), first.title_style, &first.action), ("89", TitleStyle::Mono, &Action::Recall(0)));
+        launcher.set_query(String::from("ms"));
+        assert_eq!(titles(&launcher), ["500ns to ms"]);
+        launcher.set_query(String::from("900 day to ns"));
+        assert!(items(&launcher).is_empty());
+        assert_eq!(empty_text(Page::Calculator), "NO MATCHING HISTORY");
+    }
+
+    #[test]
+    fn the_answer_belongs_to_the_search_it_was_computed_for() {
+        let mut launcher = calculator();
+        launcher.set_query(String::from("900 day to ns"));
+        launcher.set_answer(String::from("900 day to n"), Some(answer("7.776E13 ns")));
+        assert_eq!(launcher.answer(), None);
+        launcher.set_answer(String::from("900 day to ns"), Some(answer("7.776E16 ns")));
+        assert_eq!(launcher.answer(), Some(&answer("7.776E16 ns")));
+        // qalc runs per keystroke, so an older search can answer last.
+        launcher.set_answer(String::from("900 day to n"), Some(answer("7.776E13 ns")));
+        assert_eq!(launcher.answer(), Some(&answer("7.776E16 ns")));
+        // Fewer rows fit under the result card.
+        assert!(launcher.visible_rows() < VISIBLE_ROWS);
+        launcher.set_query(String::from("900 day to s"));
+        assert_eq!(launcher.answer(), None);
+    }
+
+    #[test]
+    fn enter_copies_the_answer_unless_a_past_calculation_was_picked() {
+        let mut launcher = calculator();
+        assert_eq!(calculator_enter(&launcher), CalcEnter::Recall(String::from("4 * 22 + 1")));
+        launcher.set_query(String::from("22"));
+        launcher.set_answer(String::from("22"), Some(answer("22")));
+        assert_eq!(calculator_enter(&launcher), CalcEnter::Copy(answer("22")));
+        launcher.move_selection(1, 1);
+        assert_eq!(calculator_enter(&launcher), CalcEnter::Recall(String::from("4 * 22 + 1")));
+        launcher.set_query(String::from("zzz"));
+        assert_eq!(calculator_enter(&launcher), CalcEnter::Nothing);
     }
 
     #[test]
