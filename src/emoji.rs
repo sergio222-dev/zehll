@@ -131,6 +131,28 @@ pub fn layout(query: &str, counts: &HashMap<String, u32>) -> (Vec<&'static Emoji
     (shown, lines)
 }
 
+/// Keywords of each emoji from emojilib, the list ii searches: "thunder" finds ⚡ although its
+/// Unicode name is "high voltage".
+const KEYWORDS: &str = include_str!("../assets/emoji/keywords.tsv");
+
+/// Keywords by emoji (without variation selectors) from `keywords.tsv` lines: the emoji, a tab,
+/// then comma-separated keywords. `#` lines are comments.
+fn parse_keywords(text: &'static str) -> HashMap<&'static str, Vec<&'static str>> {
+    text.lines()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(emoji, words)| (emoji, words.split(',').filter(|word| !word.is_empty()).collect()))
+        .collect()
+}
+
+/// The keywords of `emoji`, in its default tone; empty when emojilib has none.
+fn keywords(emoji: &Emoji) -> &'static [&'static str] {
+    static TABLE: std::sync::OnceLock<HashMap<&'static str, Vec<&'static str>>> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| parse_keywords(KEYWORDS));
+    let key = base(emoji).replace('\u{fe0f}', "");
+    table.get(key.as_str()).map_or(&[], Vec::as_slice)
+}
+
 /// The most picked emojis, most first, at most `MOST_USED`.
 pub fn most_used(counts: &HashMap<String, u32>) -> Vec<&'static Emoji> {
     let mut picked: Vec<(&'static Emoji, u32)> = counts.iter().filter(|(_, count)| **count > 0).filter_map(|(emoji, count)| Some((emojis::get(emoji)?, *count))).collect();
@@ -139,15 +161,17 @@ pub fn most_used(counts: &HashMap<String, u32>) -> Vec<&'static Emoji> {
     picked.into_iter().take(MOST_USED).map(|(emoji, _)| emoji).collect()
 }
 
-/// Emojis matching `query` by name or shortcode (or, weaker, by group), best first; equal
-/// scores go to the more picked one, then keep Unicode's order.
+/// Emojis matching `query` by name or shortcode (or, weaker, by keyword, then by group), best
+/// first; equal scores go to the more picked one, then keep Unicode's order.
 pub fn search(query: &str, counts: &HashMap<String, u32>) -> Vec<&'static Emoji> {
     let mut ranked: Vec<(f32, u32, &'static Emoji)> = emojis::iter()
         .filter_map(|emoji| {
             let own = std::iter::once(emoji.name()).chain(emoji.shortcodes()).filter_map(|field| fuzzy::score(query, field)).reduce(f32::max);
+            // A keyword is a looser description than the name, so it ranks a bit lower.
+            let keyword = keywords(emoji).iter().filter_map(|field| fuzzy::score(query, field)).reduce(f32::max).map(|score| score * 0.8);
             // A group match alone ranks under any match of the emoji's own words.
             let group = fuzzy::score(query, group_title(emoji.group())).map(|score| score * 0.5);
-            let score = own.into_iter().chain(group).reduce(f32::max)?;
+            let score = own.into_iter().chain(keyword).chain(group).reduce(f32::max)?;
             Some((score, count(counts, emoji), emoji))
         })
         .collect();
@@ -347,6 +371,28 @@ mod tests {
         let picked = counts(&[(joy, 5)]);
         let first = search("face with tears", &picked)[0];
         assert_eq!(first.as_str(), joy);
+    }
+
+    #[test]
+    fn keywords_are_read_from_the_table() {
+        let table = parse_keywords("# comment\n⚡\thigh voltage,thunder\n☂\tumbrella,rain\n\n");
+        assert_eq!(table.get("⚡"), Some(&vec!["high voltage", "thunder"]));
+        assert_eq!(table.get("☂").map(Vec::len), Some(2));
+        assert_eq!(table.len(), 2);
+        // Every emoji emojilib knows is found, with or without its variation selector.
+        assert!(keywords(get("⚡")).contains(&"thunder"));
+        assert!(keywords(get("☂️")).contains(&"rain"));
+        assert!(keywords(get("👍🏽")).contains(&"thumbsup"));
+    }
+
+    #[test]
+    fn a_search_matches_keywords_below_names() {
+        let thunder = search("thunder", &HashMap::new());
+        assert!(thunder.iter().take(3).any(|emoji| emoji.as_str() == "⚡"), "{:?}", thunder.iter().take(5).map(|e| e.as_str()).collect::<Vec<_>>());
+        // "lightning" is in a name (cloud with lightning), which beats ⚡'s keyword.
+        let lightning = search("lightning", &HashMap::new());
+        assert_eq!(lightning[0].as_str(), "🌩️");
+        assert!(lightning.iter().any(|emoji| emoji.as_str() == "⚡"));
     }
 
     #[test]
