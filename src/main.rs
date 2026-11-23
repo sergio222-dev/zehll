@@ -1531,8 +1531,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let Some(shot) = bar.snips.get(&id) else {
                 return Task::none();
             };
-            let frame = shot.frame.clone();
-            let area = snip::crop(rect, shot.monitor.scale, frame.dimensions());
+            let frame = shot.handle.clone();
+            let area = snip::dimensions(&frame).and_then(|size| snip::crop(rect, shot.monitor.scale, size));
             let action = if edit { snip::Action::Edit } else { snip::Action::Copy { save: bar.snip_save } };
             let close = close_snip(bar);
             return match area {
