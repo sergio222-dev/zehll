@@ -47,7 +47,14 @@ Type to search; the list is fuzzy matched. Up/Down, Tab/Shift+Tab, Ctrl+J/K and 
 - **Keybinds** lists every Hyprland keybinding that has a description, searchable by keys or description.
 - **Calculator** evaluates the search with qalc as you type: math, units and currencies. Enter copies the result and keeps it in a history of 25 (`~/.local/state/zehll/calculator.json`); Ctrl+Enter puts `(result)` back in the search; Tab walks the history and Enter on a past calculation reuses it.
 
-The launcher uses the layer namespaces `zehll-launcher` and `zehll-launcher-catcher`. Setting `ZEHLL_CLIPHIST_DB` to a file makes the clipboard page use that cliphist database instead of the default one, which is useful to try deleting and wiping without touching your history.
+The launcher uses the layer namespaces `zehll-launcher` and `zehll-launcher-catcher`. Hyprland fades and slides layers in and out by default; to open and close the launcher instantly, turn that off for both:
+
+```lua
+hl.layer_rule({ match = { namespace = "^zehll-launcher$" }, no_anim = true })
+hl.layer_rule({ match = { namespace = "^zehll-launcher-catcher$" }, no_anim = true })
+```
+
+Setting `ZEHLL_CLIPHIST_DB` to a file makes the clipboard page use that cliphist database instead of the default one, which is useful to try deleting and wiping without touching your history.
 
 ## Requirements
 
