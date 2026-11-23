@@ -13,6 +13,7 @@ mod files;
 mod flame;
 mod flashbang;
 mod fuzzy;
+mod gallery;
 mod hyprland;
 mod idle;
 mod keybinds;
@@ -40,6 +41,8 @@ mod todo;
 mod trail;
 mod tray;
 mod usage;
+mod wallhaven;
+mod wallpaper;
 mod workspaces;
 
 use std::borrow::Cow;
@@ -69,6 +72,8 @@ const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 const MEETINGS_POLL: Duration = Duration::from_secs(120);
 // Pause in typing before the Files page runs fd.
 const FILES_DEBOUNCE: Duration = Duration::from_millis(150);
+/// Wallhaven is searched once typing stops for this long.
+const WALLHAVEN_DEBOUNCE: Duration = Duration::from_millis(600);
 // Wait before opening the bar of a monitor plugged in while Zehll runs (see `set_monitors`).
 const NEW_MONITOR_DELAY: Duration = Duration::from_millis(500);
 // How often the system indicator reads /proc.
@@ -219,6 +224,13 @@ struct Bar {
     // The monitors are being captured; the selector opens once they are.
     snip_capturing: bool,
     snip_save: bool,
+    wallpaper: wallpaper::State,
+    // The current wallpaper scaled for each monitor, by monitor name.
+    wallpaper_scaled: HashMap<String, wallpaper::Scaled>,
+    // Each monitor's wallpaper layer, by monitor name.
+    wallpaper_layers: HashMap<String, wallpaper::Layer>,
+    // A wallpaper is being scaled; a monitor without its size waits for it instead of asking again.
+    wallpaper_preparing: bool,
 }
 
 struct Popup {
@@ -235,6 +247,8 @@ enum Surface {
     System,
     Launcher,
     Snip,
+    // A monitor's wallpaper, by monitor name.
+    Wallpaper(String),
     MeetingAlerts,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
@@ -334,6 +348,10 @@ impl Bar {
             snips: HashMap::new(),
             snip_capturing: false,
             snip_save: state.snip_save,
+            wallpaper: wallpaper::load(),
+            wallpaper_scaled: HashMap::new(),
+            wallpaper_layers: HashMap::new(),
+            wallpaper_preparing: false,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -345,6 +363,12 @@ impl Bar {
             false => restore,
         };
         let restore = restore.chain(fetch_meetings(&bar));
+        // The last wallpaper comes back (scaled sizes are cached) without recoloring again.
+        let mut bar = bar;
+        let restore = match bar.wallpaper.path.clone() {
+            Some(path) => Task::batch([restore, prepare_wallpaper(&mut bar, path, false)]),
+            None => restore,
+        };
         // Loaded now too, so the first opening of the launcher already lists them.
         (bar, Task::batch([restore, load_apps()]))
     }
@@ -499,6 +523,42 @@ enum Message {
     Snip(Id, snip::Rect, bool),
     CancelSnip,
     ToggleSnipSave,
+    // A wallpaper and the index of its accent among matugen's source colors.
+    ApplyWallpaper(std::path::PathBuf, usize),
+    GalleryList(Vec<gallery::Entry>),
+    // An image and its thumbnail, `None` when it cannot be made.
+    GalleryThumb(std::path::PathBuf, Option<std::path::PathBuf>),
+    GalleryColors(std::path::PathBuf, Vec<String>),
+    // A tile, by its position among the tiles shown: selects it, or applies it when selected.
+    GalleryClick(usize),
+    GalleryScroll(i32),
+    GalleryAccent(usize),
+    OpenWallpaperFolder,
+    // Opens the launcher on a page, or closes it when it is open there.
+    ToggleLauncherPage(launcher::Page),
+    // Applies a random wallpaper, once the folder is listed.
+    RandomWallpaper,
+    RandomWallpaperFrom(Vec<gallery::Entry>),
+    // The Wallhaven page's buttons.
+    WallhavenKey,
+    WallhavenCategory(usize),
+    WallhavenPurity(usize),
+    WallhavenSorting,
+    WallhavenOrder,
+    WallhavenReload,
+    // A result, by its position: selects it, applies it when selected, retries a failed thumbnail.
+    WallhavenClick(usize),
+    WallhavenScroll(i32),
+    // The search after typing stopped.
+    WallhavenSearch(String),
+    WallhavenResults(u64, Result<wallhaven::Results, String>),
+    WallhavenThumb(String, Option<std::path::PathBuf>),
+    // A downloaded wallpaper: its id, and its file or why it failed.
+    WallhavenFetched(String, Result<std::path::PathBuf, String>),
+    // The wallpaper scaled, whether to recolor the desktop, and its sizes (`None` if unreadable).
+    WallpaperPrepared(std::path::PathBuf, bool, Option<Vec<wallpaper::Scaled>>),
+    // A frame of a wallpaper sliding to its new place.
+    WallpaperFrame,
 }
 
 fn namespace() -> String {
@@ -553,6 +613,10 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         ]),
         false => Subscription::none(),
     };
+    let wallpaper_pan = match bar.wallpaper_layers.values().any(|layer| layer.pan.animating(Instant::now())) {
+        true => time::every(Duration::from_millis(16)).map(|_| Message::WallpaperFrame),
+        false => Subscription::none(),
+    };
     let workspace_move = match bar.workspaces.values().any(|indicator| indicator.animating(Instant::now())) {
         true => time::every(Duration::from_millis(16)).map(|_| Message::WorkspaceFrame),
         false => Subscription::none(),
@@ -584,6 +648,8 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
             shortcuts::Shortcut::LauncherToggle | shortcuts::Shortcut::LauncherTap => Message::ToggleLauncher,
             shortcuts::Shortcut::Screenshot => Message::ToggleSnip,
+            shortcuts::Shortcut::Wallpapers => Message::ToggleLauncherPage(launcher::Page::Wallpapers),
+            shortcuts::Shortcut::WallpaperRandom => Message::RandomWallpaper,
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
@@ -596,6 +662,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         media,
         flare,
         workspace_move,
+            wallpaper_pan,
     ])
 }
 
@@ -765,7 +832,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return activate_tray(bar, request).chain(close_tray_menu(bar));
         }
         Message::WindowClosed(id) => {
-            bar.surfaces.remove(&id);
+            if let Some(Surface::Wallpaper(name)) = bar.surfaces.remove(&id) {
+                bar.wallpaper_layers.remove(&name);
+            }
             bar.bars.remove(&id);
             // The compositor dismissed it, for example a popup clicked outside.
             if bar.tray_menu == Some(id) {
@@ -944,7 +1013,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             let id = Id::unique();
             bar.bars.insert(id, name.clone());
-            return Task::done(Message::NewLayerShell { settings: bar_settings(name), id });
+            let wallpaper = open_wallpaper(bar, name.clone());
+            return Task::batch([Task::done(Message::NewLayerShell { settings: bar_settings(name), id }), wallpaper]);
         }
         Message::UsageTick => {
             bar.usage.sample(Instant::now());
@@ -964,10 +1034,30 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             bar.workspaces.values_mut().for_each(|indicator| indicator.settle(now));
         }
         Message::ToggleLauncher => {
-            return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar) };
+            return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar, launcher::Page::Home) };
+        }
+        Message::ToggleLauncherPage(page) => {
+            if bar.launcher_surface.is_none() {
+                return open_launcher(bar, page);
+            }
+            if bar.launcher.page() == page {
+                return close_launcher(bar);
+            }
+            bar.launcher.reset();
+            return Task::batch([enter_page(bar, page), resize_launcher(bar)]);
+        }
+        Message::RandomWallpaper => return Task::perform(gallery::list(), Message::RandomWallpaperFrom),
+        Message::RandomWallpaperFrom(entries) => {
+            let current = bar.wallpaper.path.clone();
+            let pick = gallery::pick_other(entries.len(), |at| Some(&entries[at].path) == current.as_ref(), gallery::seed());
+            if let Some(at) = pick {
+                return Task::done(Message::ApplyWallpaper(entries[at].path.clone(), 0));
+            }
         }
         Message::LauncherQuery(query) => return set_launcher_query(bar, query),
         Message::CalcAnswer(query, answer) => bar.launcher.set_answer(query, answer),
+        Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Wallpapers => return gallery_nav(bar, nav),
+        Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Wallhaven => return wallhaven_nav(bar, nav),
         Message::LauncherNav(nav) => {
             let len = launcher::items(&bar.launcher).len();
             match nav {
@@ -976,6 +1066,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                     if !bar.launcher.back() {
                         return close_launcher(bar);
                     }
+                    // Escape takes the focus from the search field.
+                    return Task::batch([resize_launcher(bar), focus_launcher()]);
                 }
                 launcher::Nav::Move(delta) => {
                     bar.launcher.move_selection(delta, len);
@@ -987,11 +1079,120 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 launcher::Nav::Activate { secondary } => return activate_launcher_item(bar, bar.launcher.selected, secondary),
                 // Ctrl+1..9 counts the rows on screen.
                 launcher::Nav::Pick(row) => return activate_launcher_item(bar, bar.launcher.first + row, false),
+                // Only grids use these.
+                launcher::Nav::Sideways(_) | launcher::Nav::Accent(_) | launcher::Nav::Random => return Task::none(),
             }
-            // Escape takes the focus from the search field.
-            return focus_launcher();
         }
         Message::LauncherActivate(index) => return activate_launcher_item(bar, index, false),
+        Message::GalleryList(entries) => {
+            let missing: Vec<gallery::Entry> = entries.iter().filter(|entry| !bar.launcher.gallery.thumbs.contains_key(&entry.path)).cloned().collect();
+            bar.launcher.gallery.entries = entries;
+            // The current wallpaper starts selected, if it is listed.
+            let current = bar.wallpaper.path.as_ref().and_then(|path| bar.launcher.gallery_shown().iter().position(|&index| bar.launcher.gallery.entries[index].path == *path));
+            bar.launcher.gallery_select(current.unwrap_or(0));
+            let thumbs = Task::run(gallery::thumbnails(missing), |(path, thumb)| Message::GalleryThumb(path, thumb));
+            return Task::batch([thumbs, gallery_colors(bar)]);
+        }
+        Message::GalleryThumb(path, Some(thumb)) => {
+            bar.launcher.gallery.thumbs.insert(path, thumb);
+        }
+        Message::GalleryThumb(path, None) => eprintln!("zehll: cannot make a thumbnail of {}", path.display()),
+        Message::GalleryColors(path, colors) => {
+            bar.launcher.gallery.colors.insert(path, colors);
+        }
+        Message::GalleryClick(at) if at == bar.launcher.selected => return gallery_nav(bar, launcher::Nav::Activate { secondary: false }),
+        Message::GalleryClick(at) => {
+            bar.launcher.gallery_select(at);
+            return gallery_colors(bar);
+        }
+        Message::GalleryScroll(rows) => bar.launcher.gallery_scroll(rows),
+        Message::GalleryAccent(index) => bar.launcher.gallery.accent = index,
+        Message::WallhavenKey => {
+            let browser = &mut bar.launcher.wallhaven;
+            if browser.editing_key.is_some() {
+                return wallhaven_nav(bar, launcher::Nav::Back);
+            }
+            browser.editing_key = Some(bar.launcher.query.clone());
+            // The saved key fills the field, hidden, so Enter keeps it.
+            let key = browser.filters.apikey.clone().unwrap_or_default();
+            bar.launcher.set_query(key);
+            return focus_launcher();
+        }
+        Message::WallhavenCategory(index) => {
+            bar.launcher.wallhaven.filters.toggle_category(index);
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenPurity(index) => {
+            bar.launcher.wallhaven.filters.toggle_purity(index);
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenSorting => {
+            let filters = &mut bar.launcher.wallhaven.filters;
+            filters.sorting = filters.sorting.next();
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenOrder => {
+            let filters = &mut bar.launcher.wallhaven.filters;
+            filters.descending = !filters.descending;
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenReload => return wallhaven_search(bar),
+        Message::WallhavenClick(at) => {
+            let Some(wallpaper) = bar.launcher.wallhaven.results.get(at).cloned() else {
+                return Task::none();
+            };
+            if matches!(bar.launcher.wallhaven.thumbs.get(&wallpaper.id), Some(None)) {
+                bar.launcher.wallhaven.thumbs.remove(&wallpaper.id);
+                return Task::run(wallhaven::thumbnails(vec![wallpaper]), |(id, thumb)| Message::WallhavenThumb(id, thumb));
+            }
+            if at == bar.launcher.selected {
+                return wallhaven_nav(bar, launcher::Nav::Activate { secondary: false });
+            }
+            bar.launcher.wallhaven_select(at);
+        }
+        Message::WallhavenScroll(rows) => {
+            bar.launcher.wallhaven_scroll(rows);
+            let last_shown = (bar.launcher.wallhaven.first_row + wallhaven::ROWS) * wallhaven::COLUMNS - 1;
+            return wallhaven_more(bar, last_shown);
+        }
+        Message::WallhavenSearch(query) => {
+            let browser = &bar.launcher.wallhaven;
+            if query == bar.launcher.query && browser.editing_key.is_none() && bar.launcher.page() == launcher::Page::Wallhaven {
+                return wallhaven_search(bar);
+            }
+        }
+        Message::WallhavenResults(request, results) => {
+            let new: Vec<wallhaven::Wallpaper> = results.as_ref().map(|results| results.wallpapers.clone()).unwrap_or_default();
+            let first_page = results.as_ref().is_ok_and(|results| results.page <= 1);
+            if !bar.launcher.wallhaven.accept(request, results) {
+                return Task::none();
+            }
+            if first_page {
+                bar.launcher.wallhaven_select(0);
+            }
+            return Task::run(wallhaven::thumbnails(new), |(id, thumb)| Message::WallhavenThumb(id, thumb));
+        }
+        Message::WallhavenThumb(id, thumb) => {
+            bar.launcher.wallhaven.thumbs.insert(id, thumb);
+        }
+        Message::WallhavenFetched(id, result) => {
+            let browser = &mut bar.launcher.wallhaven;
+            if browser.applying.as_deref() == Some(id.as_str()) {
+                browser.applying = None;
+            }
+            match result {
+                Ok(path) => return Task::done(Message::ApplyWallpaper(path, 0)),
+                Err(error) => browser.error = Some(format!("Download failed: {error}")),
+            }
+        }
+        Message::OpenWallpaperFolder => {
+            let folder = gallery::folder();
+            let _ = std::fs::create_dir_all(&folder);
+            if !hyprland::exec(&format!("xdg-open {}", files::shell_quote(&folder.to_string_lossy()))) {
+                eprintln!("zehll: cannot open {}", folder.display());
+            }
+            return close_launcher(bar);
+        }
         Message::LauncherApps(apps) => bar.launcher.apps = apps,
         Message::LauncherScroll(rows, len) => bar.launcher.scroll(rows, len),
         Message::FilesRecent(recent) => {
@@ -1277,6 +1478,37 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             bar.snip_save = !bar.snip_save;
             bar.save_state();
         }
+        Message::ApplyWallpaper(path, accent) => {
+            bar.wallpaper.path = Some(path.clone());
+            bar.wallpaper.accent = accent;
+            wallpaper::save(&bar.wallpaper);
+            return prepare_wallpaper(bar, path, true);
+        }
+        Message::WallpaperPrepared(path, recolor, crops) => {
+            bar.wallpaper_preparing = false;
+            // A newer choice is already being prepared.
+            if bar.wallpaper.path.as_ref() != Some(&path) {
+                return Task::none();
+            }
+            let Some(scaled) = crops else {
+                return Task::none();
+            };
+            bar.wallpaper_scaled = scaled.into_iter().map(|scaled| (scaled.monitor.clone(), scaled)).collect();
+            // Layers already open take the new wallpaper; monitors whose bar is open get one.
+            for (name, layer) in bar.wallpaper_layers.iter_mut() {
+                let slot = bar.monitors.iter().find(|monitor| monitor.name == *name).and_then(|monitor| workspaces::slot(monitor.workspace));
+                if let Some(scaled) = bar.wallpaper_scaled.get(name) {
+                    layer.replace(scaled.clone(), slot.unwrap_or(0));
+                }
+            }
+            let names: Vec<String> = bar.bars.values().cloned().collect();
+            let show = Task::batch(names.into_iter().map(|name| open_wallpaper(bar, name)));
+            return match recolor {
+                true => show.chain(Task::future(wallpaper::recolor(path, bar.wallpaper.accent)).discard()),
+                false => show,
+            };
+        }
+        Message::WallpaperFrame => {}
         Message::PowerMenu => {
             if let Err(err) = std::process::Command::new("wlogout").spawn() {
                 eprintln!("zehll: cannot start wlogout: {err}");
@@ -1523,7 +1755,47 @@ fn set_monitors(bar: &mut Bar, monitors: Vec<hyprland::Monitor>) -> Task<Message
         });
     }
     bar.monitors = monitors;
+    // Each wallpaper slides to its monitor's workspace; an unplugged monitor's layer goes.
+    let gone: Vec<String> = bar.wallpaper_layers.keys().filter(|name| !bar.monitors.iter().any(|monitor| monitor.name == **name)).cloned().collect();
+    for name in gone {
+        if let Some(layer) = bar.wallpaper_layers.remove(&name) {
+            tasks.push(Task::done(Message::RemoveWindow(layer.id)));
+        }
+    }
+    for monitor in &bar.monitors {
+        if let (Some(layer), Some(slot)) = (bar.wallpaper_layers.get_mut(&monitor.name), workspaces::slot(monitor.workspace)) {
+            layer.slide_to(slot, now);
+        }
+    }
+    // A monitor plugged in after the wallpaper was scaled needs its own size.
+    let missing = bar.monitors.iter().any(|monitor| !bar.wallpaper_scaled.contains_key(&monitor.name));
+    if missing && !bar.wallpaper_scaled.is_empty() && !bar.wallpaper_preparing
+        && let Some(path) = bar.wallpaper.path.clone()
+    {
+        tasks.push(prepare_wallpaper(bar, path, false));
+    }
     Task::batch(tasks)
+}
+
+/// Scales `path` for every monitor in the background, then shows it.
+fn prepare_wallpaper(bar: &mut Bar, path: std::path::PathBuf, recolor: bool) -> Task<Message> {
+    bar.wallpaper_preparing = true;
+    Task::perform(wallpaper::prepare(path.clone()), move |scaled| Message::WallpaperPrepared(path.clone(), recolor, scaled))
+}
+
+/// Opens the wallpaper layer of monitor `name`, once its wallpaper is scaled.
+fn open_wallpaper(bar: &mut Bar, name: String) -> Task<Message> {
+    let Some(scaled) = bar.wallpaper_scaled.get(&name).cloned() else {
+        return Task::none();
+    };
+    if bar.wallpaper_layers.contains_key(&name) {
+        return Task::none();
+    }
+    let slot = bar.monitors.iter().find(|monitor| monitor.name == name).and_then(|monitor| workspaces::slot(monitor.workspace)).unwrap_or(0);
+    let id = Id::unique();
+    bar.surfaces.insert(id, Surface::Wallpaper(name.clone()));
+    bar.wallpaper_layers.insert(name.clone(), wallpaper::Layer::new(id, scaled, slot));
+    Task::done(Message::NewLayerShell { settings: wallpaper::layer_settings(name), id })
 }
 
 fn bar_settings(output: String) -> NewLayerShellSettings {
@@ -1670,15 +1942,20 @@ fn close_system(bar: &mut Bar) -> Task<Message> {
 }
 
 /// Opens the launcher centered on the focused monitor, on Home, closing every popover.
-fn open_launcher(bar: &mut Bar) -> Task<Message> {
+fn open_launcher(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
     let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
     bar.launcher.reset();
     bar.launcher.now = Local::now().timestamp();
     bar.launcher.running = hyprland::clients().into_iter().map(|(_, class)| class).collect();
+    // A page opened by a shortcut sizes the surface from the start.
+    let page_task = match page {
+        launcher::Page::Home => Task::none(),
+        page => enter_page(bar, page),
+    };
     let surface = NewLayerShellSettings {
-        size: Some((launcher::WIDTH, launcher::HEIGHT)),
+        size: Some(launcher::size(page)),
         layer: Layer::Overlay,
         // No anchor centers it on the output.
         anchor: Anchor::empty(),
@@ -1696,7 +1973,8 @@ fn open_launcher(bar: &mut Bar) -> Task<Message> {
         settings: catcher_settings(output, "zehll-launcher-catcher"),
         id: open.catcher,
     })
-    .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }));
+    .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }))
+    .chain(page_task);
     bar.launcher_surface = Some(open);
     Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_system(bar), Task::done(Message::HideTooltip), task, load_apps()])
 }
@@ -1784,6 +2062,165 @@ fn close_launcher(bar: &mut Bar) -> Task<Message> {
     }))
 }
 
+/// Enters `page` from Home and loads what it shows. The caller fits the surface to it.
+fn enter_page(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
+    if page == launcher::Page::Keybinds {
+        bar.launcher.keybinds = keybinds::load();
+    }
+    bar.launcher.open(page);
+    match page {
+        launcher::Page::Files => Task::batch([Task::perform(files::recent(), Message::FilesRecent), focus_launcher()]),
+        launcher::Page::Clipboard => {
+            let request = bar.launcher.begin_clips();
+            Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
+        }
+        launcher::Page::Wallpapers => Task::batch([Task::perform(gallery::list(), Message::GalleryList), focus_launcher()]),
+        // Results stay between openings; the first opening searches.
+        launcher::Page::Wallhaven => {
+            let browser = &bar.launcher.wallhaven;
+            let search = match browser.results.is_empty() && !browser.loading {
+                true => wallhaven_search(bar),
+                false => Task::none(),
+            };
+            bar.launcher.wallhaven_select(0);
+            Task::batch([search, focus_launcher()])
+        }
+        _ => focus_launcher(),
+    }
+}
+
+/// Fits the launcher's surface to its page: the Wallpapers grid is larger.
+fn resize_launcher(bar: &Bar) -> Task<Message> {
+    match &bar.launcher_surface {
+        Some(open) => Task::done(Message::SizeChange { id: open.panel, size: launcher::size(bar.launcher.page()) }),
+        None => Task::none(),
+    }
+}
+
+/// Keys on the Wallpapers page: arrows move among the tiles, Alt+arrows pick the accent,
+/// Enter applies the selected wallpaper and Ctrl+R a random one.
+fn gallery_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
+    match nav {
+        launcher::Nav::Close => return close_launcher(bar),
+        launcher::Nav::Back => {
+            if !bar.launcher.back() {
+                return close_launcher(bar);
+            }
+            return Task::batch([resize_launcher(bar), focus_launcher()]);
+        }
+        launcher::Nav::Move(rows) => bar.launcher.gallery_move(rows * gallery::COLUMNS as i32),
+        launcher::Nav::Sideways(delta) => bar.launcher.gallery_move(delta),
+        launcher::Nav::Accent(delta) => {
+            let count = bar.launcher.gallery_selected().and_then(|entry| bar.launcher.gallery.colors.get(&entry.path)).map_or(0, Vec::len);
+            bar.launcher.gallery.accent = gallery::cycle(bar.launcher.gallery.accent, delta, count);
+            return Task::none();
+        }
+        launcher::Nav::Random => {
+            let shown = bar.launcher.gallery_shown();
+            let others: Vec<usize> = (0..shown.len()).filter(|&at| Some(&bar.launcher.gallery.entries[shown[at]].path) != bar.wallpaper.path.as_ref()).collect();
+            if others.is_empty() {
+                return Task::none();
+            }
+            let Some(at) = gallery::pick_other(others.len(), |_| false, gallery::seed()) else {
+                return Task::none();
+            };
+            bar.launcher.gallery_select(others[at]);
+            return gallery_nav(bar, launcher::Nav::Activate { secondary: false });
+        }
+        launcher::Nav::Activate { .. } => {
+            let Some(entry) = bar.launcher.gallery_selected() else {
+                return Task::none();
+            };
+            return Task::done(Message::ApplyWallpaper(entry.path.clone(), bar.launcher.gallery.accent));
+        }
+        launcher::Nav::Pick(_) => return Task::none(),
+    }
+    gallery_colors(bar)
+}
+
+/// Keys on the Wallhaven page: like the Wallpapers grid, Ctrl+Enter also keeps the download in
+/// the wallpaper folder. While the API key is typed, Enter saves it and Shift+Escape cancels.
+fn wallhaven_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
+    if let Some(search) = bar.launcher.wallhaven.editing_key.clone() {
+        let entered = bar.launcher.query.trim().to_owned();
+        bar.launcher.wallhaven.editing_key = None;
+        bar.launcher.set_query(search);
+        return match nav {
+            launcher::Nav::Activate { .. } => {
+                let filters = &mut bar.launcher.wallhaven.filters;
+                filters.apikey = Some(entered).filter(|key| !key.is_empty());
+                if !filters.has_key() {
+                    filters.purity = [true, false, false];
+                }
+                Task::batch([wallhaven_filters_changed(bar), focus_launcher()])
+            }
+            launcher::Nav::Close => close_launcher(bar),
+            _ => focus_launcher(),
+        };
+    }
+    match nav {
+        launcher::Nav::Close => return close_launcher(bar),
+        launcher::Nav::Back => {
+            if !bar.launcher.back() {
+                return close_launcher(bar);
+            }
+            return Task::batch([resize_launcher(bar), focus_launcher()]);
+        }
+        launcher::Nav::Move(rows) => bar.launcher.wallhaven_move(rows * wallhaven::COLUMNS as i32),
+        launcher::Nav::Sideways(delta) => bar.launcher.wallhaven_move(delta),
+        launcher::Nav::Activate { secondary } => {
+            let browser = &mut bar.launcher.wallhaven;
+            let Some(wallpaper) = browser.results.get(bar.launcher.selected).cloned() else {
+                return Task::none();
+            };
+            browser.applying = Some(wallpaper.id.clone());
+            browser.error = None;
+            let id = wallpaper.id.clone();
+            return Task::perform(wallhaven::fetch(wallpaper, gallery::folder(), secondary), move |result| Message::WallhavenFetched(id.clone(), result));
+        }
+        launcher::Nav::Accent(_) | launcher::Nav::Random | launcher::Nav::Pick(_) => return Task::none(),
+    }
+    let selected = bar.launcher.selected;
+    wallhaven_more(bar, selected)
+}
+
+/// A new first page for the search and filters.
+fn wallhaven_search(bar: &mut Bar) -> Task<Message> {
+    let request = bar.launcher.wallhaven.begin();
+    let url = wallhaven::search_url(&bar.launcher.query, &bar.launcher.wallhaven.filters, 1);
+    Task::perform(wallhaven::search(url), move |results| Message::WallhavenResults(request, results))
+}
+
+/// The next page, when `index` is close to the end of the results.
+fn wallhaven_more(bar: &mut Bar, index: usize) -> Task<Message> {
+    if !bar.launcher.wallhaven.near_end(index) {
+        return Task::none();
+    }
+    let Some((request, page)) = bar.launcher.wallhaven.begin_more() else {
+        return Task::none();
+    };
+    let url = wallhaven::search_url(&bar.launcher.query, &bar.launcher.wallhaven.filters, page);
+    Task::perform(wallhaven::search(url), move |results| Message::WallhavenResults(request, results))
+}
+
+/// Saves the filters and searches again with them.
+fn wallhaven_filters_changed(bar: &mut Bar) -> Task<Message> {
+    wallpaper::save_section("wallhaven", bar.launcher.wallhaven.filters.to_json());
+    wallhaven_search(bar)
+}
+
+/// Asks matugen for the selected wallpaper's colors, unless they are known.
+fn gallery_colors(bar: &Bar) -> Task<Message> {
+    let Some(entry) = bar.launcher.gallery_selected() else {
+        return Task::none();
+    };
+    if bar.launcher.gallery.colors.contains_key(&entry.path) {
+        return Task::none();
+    }
+    let path = entry.path.clone();
+    Task::perform(gallery::source_colors(path.clone()), move |colors| Message::GalleryColors(path.clone(), colors))
+}
+
 fn focus_launcher() -> Task<Message> {
     iced::widget::operation::focus(launcher::input_id())
 }
@@ -1799,20 +2236,7 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
             Some(entry) => Task::batch([set_launcher_query(bar, entry.input.clone()), focus_launcher()]),
             None => focus_launcher(),
         },
-        launcher::Action::Open(page) => {
-            if page == launcher::Page::Keybinds {
-                bar.launcher.keybinds = keybinds::load();
-            }
-            bar.launcher.open(page);
-            match page {
-                launcher::Page::Files => Task::batch([Task::perform(files::recent(), Message::FilesRecent), focus_launcher()]),
-                launcher::Page::Clipboard => {
-                    let request = bar.launcher.begin_clips();
-                    Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
-                }
-                _ => focus_launcher(),
-            }
-        }
+        launcher::Action::Open(page) => Task::batch([enter_page(bar, page), resize_launcher(bar)]),
         launcher::Action::App(index) => {
             let Some(app) = bar.launcher.apps.get(index).cloned() else {
                 return focus_launcher();
@@ -1855,6 +2279,16 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
 /// searches it once typing pauses.
 fn set_launcher_query(bar: &mut Bar, query: String) -> Task<Message> {
     bar.launcher.set_query(query.clone());
+    // The search moves the selection to the first matching wallpaper.
+    if bar.launcher.page() == launcher::Page::Wallpapers {
+        return gallery_colors(bar);
+    }
+    if bar.launcher.page() == launcher::Page::Wallhaven {
+        return match bar.launcher.wallhaven.editing_key {
+            Some(_) => Task::none(),
+            None => Task::perform(tokio::time::sleep(WALLHAVEN_DEBOUNCE), move |()| Message::WallhavenSearch(query.clone())),
+        };
+    }
     if query.trim().is_empty() {
         return load_preview(bar);
     }
@@ -1986,6 +2420,12 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Tooltip(Tooltip::System)) => return sysmon::tooltip(bar),
         Some(Surface::Launcher) => return launcher::view(bar),
         Some(Surface::Snip) => return snip::view(bar, id),
+        Some(Surface::Wallpaper(name)) => {
+            return match bar.wallpaper_layers.get(name) {
+                Some(layer) => wallpaper::view(layer, Instant::now()),
+                None => Space::new().into(),
+            };
+        }
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),

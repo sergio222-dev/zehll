@@ -229,6 +229,11 @@ fn focused_monitor_json() -> Option<serde_json::Value> {
         .cloned()
 }
 
+/// Every monitor as `hyprctl monitors -j` lists it.
+pub fn monitors_json() -> Option<serde_json::Value> {
+    request("j/monitors")
+}
+
 /// Name of the monitor Hyprland currently considers focused.
 pub fn focused_monitor() -> Option<String> {
     focused_monitor_json()?["name"].as_str().map(str::to_owned)
