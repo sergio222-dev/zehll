@@ -16,17 +16,22 @@ pub enum Shortcut {
     PanelToggle,
     MeetingTest,
     LauncherToggle,
+    /// The release of a SUPER tap: the Hyprland config arms it on SUPER, cancels it on any
+    /// other key and sends it from a release bind, which reaches Zehll as `released`.
+    LauncherTap,
     Screenshot,
 }
 
 impl Shortcut {
-    const ALL: [Shortcut; 4] = [Shortcut::PanelToggle, Shortcut::MeetingTest, Shortcut::LauncherToggle, Shortcut::Screenshot];
+    const ALL: [Shortcut; 5] =
+        [Shortcut::PanelToggle, Shortcut::MeetingTest, Shortcut::LauncherToggle, Shortcut::LauncherTap, Shortcut::Screenshot];
 
     fn name(self) -> &'static str {
         match self {
             Shortcut::PanelToggle => "panelToggle",
             Shortcut::MeetingTest => "meetingTest",
             Shortcut::LauncherToggle => "launcherToggle",
+            Shortcut::LauncherTap => "launcherTap",
             Shortcut::Screenshot => "screenshot",
         }
     }
@@ -36,8 +41,14 @@ impl Shortcut {
             Shortcut::PanelToggle => "Toggle the side panel",
             Shortcut::MeetingTest => "Show a test meeting alert",
             Shortcut::LauncherToggle => "Toggle the app launcher",
+            Shortcut::LauncherTap => "Toggle the app launcher when released (SUPER tap)",
             Shortcut::Screenshot => "Snip a zone of the screen",
         }
+    }
+
+    /// Whether a `pressed` (or else `released`) event of this shortcut triggers it.
+    fn fires(self, pressed: bool) -> bool {
+        pressed != (self == Shortcut::LauncherTap)
     }
 }
 
@@ -110,8 +121,27 @@ impl Dispatch<HyprlandGlobalShortcutV1, Shortcut> for State {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        if let hyprland_global_shortcut_v1::Event::Pressed { .. } = event {
+        let pressed = match event {
+            hyprland_global_shortcut_v1::Event::Pressed { .. } => true,
+            hyprland_global_shortcut_v1::Event::Released { .. } => false,
+            _ => return,
+        };
+        if shortcut.fires(pressed) {
             let _ = state.pressed.unbounded_send(*shortcut);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shortcuts_fire_on_press_and_the_super_tap_on_release() {
+        for shortcut in Shortcut::ALL {
+            let tap = shortcut == Shortcut::LauncherTap;
+            assert_eq!(shortcut.fires(true), !tap, "{shortcut:?} pressed");
+            assert_eq!(shortcut.fires(false), tap, "{shortcut:?} released");
         }
     }
 }

@@ -582,7 +582,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Subscription::run(shortcuts::events).map(|shortcut| match shortcut {
             shortcuts::Shortcut::PanelToggle => Message::TogglePanel,
             shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
-            shortcuts::Shortcut::LauncherToggle => Message::ToggleLauncher,
+            shortcuts::Shortcut::LauncherToggle | shortcuts::Shortcut::LauncherTap => Message::ToggleLauncher,
             shortcuts::Shortcut::Screenshot => Message::ToggleSnip,
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
