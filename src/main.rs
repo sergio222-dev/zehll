@@ -40,6 +40,7 @@ mod todo;
 mod trail;
 mod tray;
 mod usage;
+mod wallpaper;
 mod workspaces;
 
 use std::borrow::Cow;
@@ -219,6 +220,13 @@ struct Bar {
     // The monitors are being captured; the selector opens once they are.
     snip_capturing: bool,
     snip_save: bool,
+    wallpaper: wallpaper::State,
+    // The current wallpaper scaled for each monitor, by monitor name.
+    wallpaper_scaled: HashMap<String, wallpaper::Scaled>,
+    // Each monitor's wallpaper layer, by monitor name.
+    wallpaper_layers: HashMap<String, wallpaper::Layer>,
+    // A wallpaper is being scaled; a monitor without its size waits for it instead of asking again.
+    wallpaper_preparing: bool,
 }
 
 struct Popup {
@@ -235,6 +243,8 @@ enum Surface {
     System,
     Launcher,
     Snip,
+    // A monitor's wallpaper, by monitor name.
+    Wallpaper(String),
     MeetingAlerts,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
@@ -334,6 +344,10 @@ impl Bar {
             snips: HashMap::new(),
             snip_capturing: false,
             snip_save: state.snip_save,
+            wallpaper: wallpaper::load(),
+            wallpaper_scaled: HashMap::new(),
+            wallpaper_layers: HashMap::new(),
+            wallpaper_preparing: false,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -345,6 +359,12 @@ impl Bar {
             false => restore,
         };
         let restore = restore.chain(fetch_meetings(&bar));
+        // The last wallpaper comes back (scaled sizes are cached) without recoloring again.
+        let mut bar = bar;
+        let restore = match bar.wallpaper.path.clone() {
+            Some(path) => Task::batch([restore, prepare_wallpaper(&mut bar, path, false)]),
+            None => restore,
+        };
         // Loaded now too, so the first opening of the launcher already lists them.
         (bar, Task::batch([restore, load_apps()]))
     }
@@ -499,6 +519,11 @@ enum Message {
     Snip(Id, snip::Rect, bool),
     CancelSnip,
     ToggleSnipSave,
+    ApplyWallpaper(std::path::PathBuf),
+    // The wallpaper scaled, whether to recolor the desktop, and its sizes (`None` if unreadable).
+    WallpaperPrepared(std::path::PathBuf, bool, Option<Vec<wallpaper::Scaled>>),
+    // A frame of a wallpaper sliding to its new place.
+    WallpaperFrame,
 }
 
 fn namespace() -> String {
@@ -553,6 +578,10 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         ]),
         false => Subscription::none(),
     };
+    let wallpaper_pan = match bar.wallpaper_layers.values().any(|layer| layer.pan.animating(Instant::now())) {
+        true => time::every(Duration::from_millis(16)).map(|_| Message::WallpaperFrame),
+        false => Subscription::none(),
+    };
     let workspace_move = match bar.workspaces.values().any(|indicator| indicator.animating(Instant::now())) {
         true => time::every(Duration::from_millis(16)).map(|_| Message::WorkspaceFrame),
         false => Subscription::none(),
@@ -596,6 +625,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         media,
         flare,
         workspace_move,
+            wallpaper_pan,
     ])
 }
 
@@ -765,7 +795,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return activate_tray(bar, request).chain(close_tray_menu(bar));
         }
         Message::WindowClosed(id) => {
-            bar.surfaces.remove(&id);
+            if let Some(Surface::Wallpaper(name)) = bar.surfaces.remove(&id) {
+                bar.wallpaper_layers.remove(&name);
+            }
             bar.bars.remove(&id);
             // The compositor dismissed it, for example a popup clicked outside.
             if bar.tray_menu == Some(id) {
@@ -944,7 +976,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             let id = Id::unique();
             bar.bars.insert(id, name.clone());
-            return Task::done(Message::NewLayerShell { settings: bar_settings(name), id });
+            let wallpaper = open_wallpaper(bar, name.clone());
+            return Task::batch([Task::done(Message::NewLayerShell { settings: bar_settings(name), id }), wallpaper]);
         }
         Message::UsageTick => {
             bar.usage.sample(Instant::now());
@@ -1277,6 +1310,36 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             bar.snip_save = !bar.snip_save;
             bar.save_state();
         }
+        Message::ApplyWallpaper(path) => {
+            bar.wallpaper.path = Some(path.clone());
+            wallpaper::save(&bar.wallpaper);
+            return prepare_wallpaper(bar, path, true);
+        }
+        Message::WallpaperPrepared(path, recolor, crops) => {
+            bar.wallpaper_preparing = false;
+            // A newer choice is already being prepared.
+            if bar.wallpaper.path.as_ref() != Some(&path) {
+                return Task::none();
+            }
+            let Some(scaled) = crops else {
+                return Task::none();
+            };
+            bar.wallpaper_scaled = scaled.into_iter().map(|scaled| (scaled.monitor.clone(), scaled)).collect();
+            // Layers already open take the new wallpaper; monitors whose bar is open get one.
+            for (name, layer) in bar.wallpaper_layers.iter_mut() {
+                let slot = bar.monitors.iter().find(|monitor| monitor.name == *name).and_then(|monitor| workspaces::slot(monitor.workspace));
+                if let Some(scaled) = bar.wallpaper_scaled.get(name) {
+                    layer.replace(scaled.clone(), slot.unwrap_or(0));
+                }
+            }
+            let names: Vec<String> = bar.bars.values().cloned().collect();
+            let show = Task::batch(names.into_iter().map(|name| open_wallpaper(bar, name)));
+            return match recolor {
+                true => show.chain(Task::future(wallpaper::recolor(path, bar.wallpaper.accent)).discard()),
+                false => show,
+            };
+        }
+        Message::WallpaperFrame => {}
         Message::PowerMenu => {
             if let Err(err) = std::process::Command::new("wlogout").spawn() {
                 eprintln!("zehll: cannot start wlogout: {err}");
@@ -1523,7 +1586,47 @@ fn set_monitors(bar: &mut Bar, monitors: Vec<hyprland::Monitor>) -> Task<Message
         });
     }
     bar.monitors = monitors;
+    // Each wallpaper slides to its monitor's workspace; an unplugged monitor's layer goes.
+    let gone: Vec<String> = bar.wallpaper_layers.keys().filter(|name| !bar.monitors.iter().any(|monitor| monitor.name == **name)).cloned().collect();
+    for name in gone {
+        if let Some(layer) = bar.wallpaper_layers.remove(&name) {
+            tasks.push(Task::done(Message::RemoveWindow(layer.id)));
+        }
+    }
+    for monitor in &bar.monitors {
+        if let (Some(layer), Some(slot)) = (bar.wallpaper_layers.get_mut(&monitor.name), workspaces::slot(monitor.workspace)) {
+            layer.slide_to(slot, now);
+        }
+    }
+    // A monitor plugged in after the wallpaper was scaled needs its own size.
+    let missing = bar.monitors.iter().any(|monitor| !bar.wallpaper_scaled.contains_key(&monitor.name));
+    if missing && !bar.wallpaper_scaled.is_empty() && !bar.wallpaper_preparing
+        && let Some(path) = bar.wallpaper.path.clone()
+    {
+        tasks.push(prepare_wallpaper(bar, path, false));
+    }
     Task::batch(tasks)
+}
+
+/// Scales `path` for every monitor in the background, then shows it.
+fn prepare_wallpaper(bar: &mut Bar, path: std::path::PathBuf, recolor: bool) -> Task<Message> {
+    bar.wallpaper_preparing = true;
+    Task::perform(wallpaper::prepare(path.clone()), move |scaled| Message::WallpaperPrepared(path.clone(), recolor, scaled))
+}
+
+/// Opens the wallpaper layer of monitor `name`, once its wallpaper is scaled.
+fn open_wallpaper(bar: &mut Bar, name: String) -> Task<Message> {
+    let Some(scaled) = bar.wallpaper_scaled.get(&name).cloned() else {
+        return Task::none();
+    };
+    if bar.wallpaper_layers.contains_key(&name) {
+        return Task::none();
+    }
+    let slot = bar.monitors.iter().find(|monitor| monitor.name == name).and_then(|monitor| workspaces::slot(monitor.workspace)).unwrap_or(0);
+    let id = Id::unique();
+    bar.surfaces.insert(id, Surface::Wallpaper(name.clone()));
+    bar.wallpaper_layers.insert(name.clone(), wallpaper::Layer::new(id, scaled, slot));
+    Task::done(Message::NewLayerShell { settings: wallpaper::layer_settings(name), id })
 }
 
 fn bar_settings(output: String) -> NewLayerShellSettings {
@@ -1986,6 +2089,12 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Tooltip(Tooltip::System)) => return sysmon::tooltip(bar),
         Some(Surface::Launcher) => return launcher::view(bar),
         Some(Surface::Snip) => return snip::view(bar, id),
+        Some(Surface::Wallpaper(name)) => {
+            return match bar.wallpaper_layers.get(name) {
+                Some(layer) => wallpaper::view(layer, Instant::now()),
+                None => Space::new().into(),
+            };
+        }
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
