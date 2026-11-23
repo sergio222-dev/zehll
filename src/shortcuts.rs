@@ -24,10 +24,12 @@ pub enum Shortcut {
     Wallpapers,
     /// A random wallpaper from the wallpaper folder.
     WallpaperRandom,
+    /// The launcher on its Wallhaven page.
+    Wallhaven,
 }
 
 impl Shortcut {
-    const ALL: [Shortcut; 7] = [
+    const ALL: [Shortcut; 8] = [
         Shortcut::PanelToggle,
         Shortcut::MeetingTest,
         Shortcut::LauncherToggle,
@@ -35,6 +37,7 @@ impl Shortcut {
         Shortcut::Screenshot,
         Shortcut::Wallpapers,
         Shortcut::WallpaperRandom,
+        Shortcut::Wallhaven,
     ];
 
     fn name(self) -> &'static str {
@@ -46,6 +49,7 @@ impl Shortcut {
             Shortcut::Screenshot => "screenshot",
             Shortcut::Wallpapers => "wallpapers",
             Shortcut::WallpaperRandom => "wallpaperRandom",
+            Shortcut::Wallhaven => "wallhaven",
         }
     }
 
@@ -58,6 +62,7 @@ impl Shortcut {
             Shortcut::Screenshot => "Snip a zone of the screen",
             Shortcut::Wallpapers => "Toggle the launcher on its Wallpapers page",
             Shortcut::WallpaperRandom => "Apply a random wallpaper",
+            Shortcut::Wallhaven => "Toggle the launcher on its Wallhaven page",
         }
     }
 

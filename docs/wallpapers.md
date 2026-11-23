@@ -37,7 +37,13 @@ The ACCENT strip shows the colors matugen can build the theme from (`--show-sour
 
 ## The Wallhaven page
 
-Pick **Wallhaven** in Home to search [wallhaven.cc](https://wallhaven.cc). The search runs 600 ms after typing stops; scrolling or moving near the end loads the next page of 24.
+Pick **Wallhaven** in Home, or use the global shortcut `zehll:wallhaven` (it toggles the launcher on this page), to search [wallhaven.cc](https://wallhaven.cc). For example, on Ctrl+Super+Shift+T:
+
+```lua
+hl.bind("CTRL + SUPER + SHIFT + T", hl.dsp.global("zehll:wallhaven"), { description = "Shell: Search Wallhaven" })
+```
+
+The search runs 600 ms after typing stops; scrolling or moving near the end loads the next page of 24.
 
 - The filter bar toggles the categories (General, Anime, People) and the purity (SFW, Sketchy, NSFW), cycles the sorting (date added, relevance, random, views, favorites, toplist of the last month), flips the order and searches again. At least one category and one purity stay on.
 - Sketchy and NSFW need an API key from your wallhaven account settings. The key button turns the search field into a hidden key field: Enter saves it, an empty field removes it, Shift+Escape cancels.

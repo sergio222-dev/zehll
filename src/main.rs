@@ -650,6 +650,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::Screenshot => Message::ToggleSnip,
             shortcuts::Shortcut::Wallpapers => Message::ToggleLauncherPage(launcher::Page::Wallpapers),
             shortcuts::Shortcut::WallpaperRandom => Message::RandomWallpaper,
+            shortcuts::Shortcut::Wallhaven => Message::ToggleLauncherPage(launcher::Page::Wallhaven),
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
