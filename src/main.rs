@@ -1131,7 +1131,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             // The current wallpaper starts selected, if it is listed.
             let current = bar.wallpaper.path.as_ref().and_then(|path| bar.launcher.gallery_shown().iter().position(|&index| bar.launcher.gallery.entries[index].path == *path));
             bar.launcher.gallery_select(current.unwrap_or(0));
-            let thumbs = Task::run(gallery::thumbnails(missing), |(path, thumb)| Message::GalleryThumb(path, thumb));
+            let (thumbs, handle) = Task::run(gallery::thumbnails(missing), |(path, thumb)| Message::GalleryThumb(path, thumb)).abortable();
+            bar.launcher.gallery.track(handle);
             // An empty listing may be a read error: never prune everything for it.
             let listed = bar.launcher.gallery.entries.clone();
             let prune = match listed.is_empty() {
@@ -1192,7 +1193,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             };
             if matches!(bar.launcher.wallhaven.thumbs.get(&wallpaper.id), Some(None)) {
                 bar.launcher.wallhaven.thumbs.remove(&wallpaper.id);
-                return Task::run(wallhaven::thumbnails(vec![wallpaper]), |(id, thumb)| Message::WallhavenThumb(id, thumb));
+                return wallhaven_thumbs(bar, vec![wallpaper]);
             }
             if at == bar.launcher.selected {
                 return wallhaven_nav(bar, launcher::Nav::Activate { secondary: false });
@@ -1219,7 +1220,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if first_page {
                 bar.launcher.wallhaven_select(0);
             }
-            return Task::run(wallhaven::thumbnails(new), |(id, thumb)| Message::WallhavenThumb(id, thumb));
+            return wallhaven_thumbs(bar, new);
         }
         Message::WallhavenThumb(id, thumb) => {
             bar.launcher.wallhaven.thumbs.insert(id, thumb);
@@ -2162,6 +2163,9 @@ fn close_launcher(bar: &mut Bar) -> Task<Message> {
     let Some(open) = bar.launcher_surface.take() else {
         return Task::none();
     };
+    // Thumbnails still missing are made again the next time a page needs them.
+    bar.launcher.gallery.stop();
+    bar.launcher.wallhaven.stop();
     Task::batch([open.panel, open.catcher].map(|id| match bar.surfaces.contains_key(&id) {
         true => Task::done(Message::RemoveWindow(id)),
         false => Task::none(),
@@ -2181,12 +2185,16 @@ fn enter_page(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
             Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
         }
         launcher::Page::Wallpapers => Task::batch([Task::perform(gallery::list(), Message::GalleryList), focus_launcher()]),
-        // Results stay between openings; the first opening searches.
+        // Results stay between openings; the first opening searches. Closing the launcher stopped
+        // the thumbnail downloads, so the missing ones start again.
         launcher::Page::Wallhaven => {
             let browser = &bar.launcher.wallhaven;
-            let search = match browser.results.is_empty() && !browser.loading {
-                true => wallhaven_search(bar),
-                false => Task::none(),
+            let missing: Vec<wallhaven::Wallpaper> =
+                browser.results.iter().filter(|wallpaper| !browser.thumbs.contains_key(&wallpaper.id)).cloned().collect();
+            let search = match (browser.results.is_empty() && !browser.loading, missing.is_empty()) {
+                (true, _) => wallhaven_search(bar),
+                (false, false) => wallhaven_thumbs(bar, missing),
+                (false, true) => Task::none(),
             };
             bar.launcher.wallhaven_select(0);
             Task::batch([search, focus_launcher()])
@@ -2329,6 +2337,13 @@ fn wallhaven_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
     }
     let selected = bar.launcher.selected;
     wallhaven_more(bar, selected)
+}
+
+/// Downloads the thumbnails of `wallpapers`, stopped by the next search or by closing the launcher.
+fn wallhaven_thumbs(bar: &mut Bar, wallpapers: Vec<wallhaven::Wallpaper>) -> Task<Message> {
+    let (task, handle) = Task::run(wallhaven::thumbnails(wallpapers), |(id, thumb)| Message::WallhavenThumb(id, thumb)).abortable();
+    bar.launcher.wallhaven.track(handle);
+    task
 }
 
 /// A new first page for the search and filters.

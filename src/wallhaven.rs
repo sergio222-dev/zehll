@@ -234,13 +234,28 @@ pub struct Browser {
     pub applying: Option<String>,
     /// The search field holds the API key being typed, and this the search it replaced.
     pub editing_key: Option<String>,
+    /// Thumbnail downloads of the current search; a new search or closing the launcher stops them.
+    thumb_tasks: Vec<iced::task::Handle>,
 }
 
 impl Browser {
-    /// Starts a new search: drops the results and returns the request's number.
+    /// Keeps `handle` as a running thumbnail download of the current search.
+    pub fn track(&mut self, handle: iced::task::Handle) {
+        self.thumb_tasks.push(handle.abort_on_drop());
+    }
+
+    /// Stops the thumbnail downloads, e.g. when the launcher closes.
+    pub fn stop(&mut self) {
+        self.thumb_tasks.clear();
+    }
+
+    /// Starts a new search: drops the results and their thumbnails, stops their downloads and
+    /// returns the request's number.
     pub fn begin(&mut self) -> u64 {
         self.request += 1;
         self.results.clear();
+        self.thumbs.clear();
+        self.stop();
         self.page = 0;
         self.last_page = 0;
         self.first_row = 0;
@@ -473,6 +488,29 @@ mod tests {
         assert!(browser.accept(third, Err(String::from("Unauthorized"))));
         assert_eq!(browser.error.as_deref(), Some("Unauthorized"));
         assert!(!browser.loading);
+    }
+
+    #[test]
+    fn a_new_search_drops_the_thumbnails_and_stops_their_downloads() {
+        let mut browser = Browser::default();
+        let request = browser.begin();
+        browser.accept(request, Ok(results(&["a", "b"], 1, 2)));
+        browser.thumbs.insert(String::from("a"), None);
+        let (_, page_one) = iced::Task::<()>::none().abortable();
+        let (_, page_two) = iced::Task::<()>::none().abortable();
+        let probes = [page_one.clone(), page_two.clone()];
+        browser.track(page_one);
+        browser.track(page_two);
+        assert!(probes.iter().all(|probe| !probe.is_aborted()));
+        browser.begin();
+        assert!(browser.thumbs.is_empty());
+        assert!(probes.iter().all(iced::task::Handle::is_aborted));
+
+        let (_, again) = iced::Task::<()>::none().abortable();
+        let probe = again.clone();
+        browser.track(again);
+        browser.stop();
+        assert!(probe.is_aborted());
     }
 
     #[test]

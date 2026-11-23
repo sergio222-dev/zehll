@@ -42,6 +42,20 @@ pub struct Gallery {
     pub accent: usize,
     /// First row shown.
     pub first_row: usize,
+    /// The thumbnails being made; replacing or dropping it stops them.
+    thumbs_task: Option<iced::task::Handle>,
+}
+
+impl Gallery {
+    /// Keeps `handle` as the running thumbnail task, stopping the previous one.
+    pub fn track(&mut self, handle: iced::task::Handle) {
+        self.thumbs_task = Some(handle.abort_on_drop());
+    }
+
+    /// Stops making thumbnails, e.g. when the launcher closes.
+    pub fn stop(&mut self) {
+        self.thumbs_task = None;
+    }
 }
 
 pub fn is_image(path: &Path) -> bool {
@@ -271,5 +285,19 @@ mod tests {
         assert_eq!(cycle(3, 1, 4), 0);
         assert_eq!(cycle(0, -1, 4), 3);
         assert_eq!(cycle(2, 1, 0), 0);
+    }
+
+    #[test]
+    fn a_new_thumbnail_task_stops_the_previous_one() {
+        let mut gallery = Gallery::default();
+        let (_, first) = iced::Task::<()>::none().abortable();
+        let (_, second) = iced::Task::<()>::none().abortable();
+        let (first_probe, second_probe) = (first.clone(), second.clone());
+        gallery.track(first);
+        assert!(!first_probe.is_aborted());
+        gallery.track(second);
+        assert!(first_probe.is_aborted() && !second_probe.is_aborted());
+        gallery.stop();
+        assert!(second_probe.is_aborted());
     }
 }
