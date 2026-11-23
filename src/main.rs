@@ -5,6 +5,7 @@ mod audio;
 mod bluetooth;
 mod bluetooth_agent;
 mod brightness;
+mod cache;
 mod calc;
 mod clipboard;
 mod calendar;
@@ -1131,7 +1132,13 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let current = bar.wallpaper.path.as_ref().and_then(|path| bar.launcher.gallery_shown().iter().position(|&index| bar.launcher.gallery.entries[index].path == *path));
             bar.launcher.gallery_select(current.unwrap_or(0));
             let thumbs = Task::run(gallery::thumbnails(missing), |(path, thumb)| Message::GalleryThumb(path, thumb));
-            return Task::batch([thumbs, gallery_colors(bar)]);
+            // An empty listing may be a read error: never prune everything for it.
+            let listed = bar.launcher.gallery.entries.clone();
+            let prune = match listed.is_empty() {
+                true => Task::none(),
+                false => Task::future(tokio::task::spawn_blocking(move || gallery::prune_thumbs(&listed))).discard(),
+            };
+            return Task::batch([thumbs, gallery_colors(bar), prune]);
         }
         Message::GalleryThumb(path, Some(thumb)) => {
             bar.launcher.gallery.thumbs.insert(path, thumb);

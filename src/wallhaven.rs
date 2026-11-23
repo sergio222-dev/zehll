@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use iced::futures::{SinkExt, Stream};
 use iced::stream;
 
+use crate::cache;
+
 pub const COLUMNS: usize = 3;
 pub const ROWS: usize = 3;
 const API: &str = "https://wallhaven.cc/api/v1/search";
@@ -281,24 +283,34 @@ impl Browser {
     }
 }
 
+/// Thumbnails kept in the cache; the least recently shown go first.
+const MAX_THUMBS: usize = 300;
+/// Applied wallpapers kept in the cache when not saved to the folder; the current one is the newest.
+const MAX_FULL: usize = 3;
+/// Largest download accepted by curl, for a thumbnail and for a full wallpaper.
+const MAX_THUMB_BYTES: &str = "5M";
+const MAX_FULL_BYTES: &str = "100M";
+
 fn cache_dir() -> PathBuf {
-    let home = || PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cache")).join("zehll/wallhaven")
+    cache::dir("wallhaven")
 }
 
-/// Downloads `url` to `file` (through a partial file), unless it is there already.
-async fn download(url: &str, file: &Path) -> Result<(), String> {
+/// Downloads `url` to `file` (through a partial file), unless it is there already. A file found
+/// in the cache is marked as used, so pruning keeps it.
+async fn download(url: &str, file: &Path, max_bytes: &str) -> Result<(), String> {
     if file.exists() {
+        cache::touch(file);
         return Ok(());
     }
     if let Some(dir) = file.parent() {
         std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
     }
-    let partial = file.with_extension("part");
+    let partial = cache::partial(file);
     let output = tokio::process::Command::new("curl")
-        .args(["-fsSL", "--retry", "2", "--max-time", "120", "-o"])
+        .args(["-fsSL", "--retry", "2", "--max-time", "120", "--max-filesize", max_bytes, "-o"])
         .arg(&partial)
         .arg(url)
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|err| format!("cannot run curl: {err}"))?;
@@ -313,6 +325,7 @@ async fn download(url: &str, file: &Path) -> Result<(), String> {
 pub async fn search(url: String) -> Result<Results, String> {
     let output = tokio::process::Command::new("curl")
         .args(["-fsSL", "--max-time", "20", &url])
+        .kill_on_drop(true)
         .output()
         .await
         .map_err(|err| format!("cannot run curl: {err}"))?;
@@ -332,10 +345,11 @@ pub async fn search(url: String) -> Result<Results, String> {
 /// downloaded (`None` when it failed).
 pub fn thumbnails(wallpapers: Vec<Wallpaper>) -> impl Stream<Item = (String, Option<PathBuf>)> {
     stream::channel(THUMB_BATCH, async move |mut output| {
+        let _ = tokio::task::spawn_blocking(|| cache::prune(&cache_dir().join("thumbs"), &["jpg"], &[], MAX_THUMBS)).await;
         for batch in wallpapers.chunks(THUMB_BATCH) {
             let fetched = batch.iter().cloned().map(|wallpaper| async move {
                 let file = cache_dir().join("thumbs").join(format!("{}.jpg", wallpaper.id));
-                let result = download(&wallpaper.thumb, &file).await;
+                let result = download(&wallpaper.thumb, &file, MAX_THUMB_BYTES).await;
                 (wallpaper.id, result.ok().map(|()| file))
             });
             for result in iced::futures::future::join_all(fetched).await {
@@ -351,7 +365,12 @@ pub fn thumbnails(wallpapers: Vec<Wallpaper>) -> impl Stream<Item = (String, Opt
 pub async fn fetch(wallpaper: Wallpaper, folder: PathBuf, keep: bool) -> Result<PathBuf, String> {
     let dir = if keep { folder } else { cache_dir().join("full") };
     let file = dir.join(wallpaper.file_name());
-    download(&wallpaper.url, &file).await.map(|()| file)
+    download(&wallpaper.url, &file, MAX_FULL_BYTES).await?;
+    if !keep {
+        let (dir, current) = (dir.clone(), file.clone());
+        let _ = tokio::task::spawn_blocking(move || cache::prune(&dir, &["jpg", "jpeg", "png", "webp"], &[current], MAX_FULL)).await;
+    }
+    Ok(file)
 }
 
 #[cfg(test)]
