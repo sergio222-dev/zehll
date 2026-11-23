@@ -8,8 +8,8 @@ use iced::{Alignment, Border, Color, Element, Length, Padding, Point, Radians, R
 
 use crate::usage::{self, Disk, HOT};
 use crate::{
-    BODY_FONT, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, Message, PILL_BACKGROUND, Tooltip, glow_style, icon_sized,
-    panel_style, slanted, system,
+    BODY_FONT, Bar, CONDENSED, CONDENSED_BOLD, CONDENSED_HEAVY, MONO, MONO_VALUE, Message, PILL_BACKGROUND, Tooltip, glow_style,
+    icon_sized, mono_width, panel_style, slanted, system,
 };
 
 pub const WIDTH: u32 = 760;
@@ -31,7 +31,8 @@ pub fn bar_button(bar: &Bar) -> Element<'_, Message> {
                 text_color: Some(theme.text_muted),
                 ..Default::default()
             }),
-            text(format!("{:.0}%", percent)).font(CONDENSED_BOLD).size(16).color(color),
+            // Right-aligned in room for "100%", so a new reading never resizes the button.
+            text(format!("{:.0}%", percent)).font(MONO_VALUE).size(14).color(color).width(mono_width(4, 14.0)).align_x(Alignment::End),
         ]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -70,7 +71,7 @@ pub fn tooltip(bar: &Bar) -> Element<'_, Message> {
         let rows = rows.into_iter().map(|(label, value)| {
             row![
                 text(label).size(13).color(theme.text_muted).width(44),
-                text(value).font(CONDENSED).size(15).color(theme.text),
+                text(value).font(MONO).size(13).color(theme.text),
             ]
             .align_y(Alignment::Center)
             .into()
@@ -140,9 +141,10 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     let top = scale(download.iter().chain(&upload).copied().fold(0.0, f32::max));
     let axis = Column::with_children((0..5).map(|step| {
         let label = usage::format_rate(top * (4 - step) as f32 / 4.0).replace("/s", "");
-        text(label).size(11).color(theme.bracket).into()
+        text(label).font(MONO).size(10).color(theme.bracket).wrapping(text::Wrapping::None).into()
     }))
-    .width(44)
+    // Room for the longest label, "124.0 KB".
+    .width(mono_width(8, 10.0))
     .height(GRAPH_HEIGHT)
     .align_x(Alignment::End)
     .spacing((GRAPH_HEIGHT - 5.0 * 14.0) / 4.0);
@@ -151,7 +153,7 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         .width(Length::Fill)
         .height(GRAPH_HEIGHT);
     let legend = |color: Color, label: String| {
-        row![container(Space::new()).width(10).height(2).style(move |_| container::background(color)), text(label).size(12).color(theme.text_muted)]
+        row![container(Space::new()).width(10).height(2).style(move |_| container::background(color)), text(label).font(MONO).size(12).color(theme.text_muted)]
             .spacing(6)
             .align_y(Alignment::Center)
     };
@@ -211,9 +213,20 @@ fn rule<'a>(theme: crate::theme::Theme) -> Element<'a, Message> {
 fn gauge<'a>(bar: &Bar, title: &'a str, fraction: f32, [top, middle, bottom]: [String; 3], big: bool) -> Element<'a, Message> {
     let theme = bar.theme;
     let inside = column![
-        text(top).size(12).color(theme.text_muted),
-        text(middle).font(if big { CONDENSED_HEAVY } else { CONDENSED_BOLD }).size(if big { 26 } else { 18 }).color(theme.text),
-        text(bottom).size(12).color(theme.text_muted),
+        // CPU and GPU show a temperature on top; the memory rings show the label USED.
+        match big {
+            true => text(top).font(MONO),
+            false => text(top),
+        }
+        .size(12)
+        .color(theme.text_muted),
+        // The big percentage is the ring's headline and keeps the bar's display face.
+        match big {
+            true => text(middle).font(CONDENSED_HEAVY).size(26),
+            false => text(middle).font(MONO_VALUE).size(16),
+        }
+        .color(theme.text),
+        text(bottom).font(MONO).size(12).color(theme.text_muted),
     ]
     .spacing(1)
     .align_x(Alignment::Center);
@@ -237,7 +250,7 @@ fn disk_row<'a>(bar: &Bar, disk: &'a Disk) -> Element<'a, Message> {
     let label = row![
         text(&disk.mount).font(BODY_FONT).size(13).color(VALUE),
         Space::new().width(Length::Fill),
-        text(format!("{:.1} / {:.1} GiB", size(disk.used), size(disk.total))).font(CONDENSED).size(15).color(theme.text),
+        text(format!("{:.1} / {:.1} GiB", size(disk.used), size(disk.total))).font(MONO).size(13).color(theme.text),
     ];
     let fill = container(slanted(Space::new().width(Length::Fill).height(8), 6.0, theme.accent))
         .width(Length::FillPortion((fraction * 1000.0).round().max(1.0) as u16));
