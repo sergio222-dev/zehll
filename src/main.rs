@@ -777,6 +777,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return Task::done(Message::NewLayerShell { settings, id });
         }
         Message::Tray(tray::TrayEvent::Ready(client)) => bar.tray_client = Some(client),
+        Message::Tray(tray::TrayEvent::Reset) => {
+            bar.tray_items.clear();
+            if bar.open_menu().is_some() {
+                return close_tray_menu(bar);
+            }
+        }
         Message::Tray(tray::TrayEvent::Event(event)) => match event {
             TrayEvent::Add(address, item) => {
                 bar.tray_items.insert(address, tray::TrayItem::new(&item));
@@ -941,7 +947,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let [program, args @ ..] = subpanel.details() else {
                 return Task::none();
             };
-            if let Err(err) = std::process::Command::new(program).args(args).spawn() {
+            if let Err(err) = system::spawn(program, args) {
                 eprintln!("zehll: cannot start {program}: {err}");
             }
             return close_panel(bar);
@@ -1433,16 +1439,23 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::Notifications(notifications::Event::Ready(handle)) => bar.notifications_handle = Some(handle),
         Message::Notifications(notifications::Event::Notify(notification)) => {
             let (id, timeout) = (notification.id, notification.timeout);
-            match bar.notifications.iter_mut().find(|existing| existing.id == id) {
-                Some(existing) => *existing = notification,
-                None => bar.notifications.insert(0, notification),
-            }
+            let dropped = notifications::push(&mut bar.notifications, notification, notifications::MAX_HISTORY);
+            let shown = bar.popups.len();
+            bar.popups.retain(|popup| !dropped.contains(&popup.id));
+            let closed = match (dropped.is_empty(), bar.notifications_handle.clone()) {
+                (false, Some(handle)) => Task::future(handle.closed(dropped, notifications::UNDEFINED)).discard(),
+                _ => Task::none(),
+            };
             if !bar.do_not_disturb {
                 bar.popups.retain(|popup| popup.id != id);
                 bar.popups.insert(0, Popup { id, expires: timeout.map(|timeout| Instant::now() + timeout) });
                 bar.popups.truncate(popup::MAX_VISIBLE);
-                return sync_popups(bar);
+                return Task::batch([closed, sync_popups(bar)]);
             }
+            if bar.popups.len() != shown {
+                return Task::batch([closed, sync_popups(bar)]);
+            }
+            return closed;
         }
         Message::Notifications(notifications::Event::Close(id)) => {
             bar.notifications.retain(|notification| notification.id != id);
@@ -1556,7 +1569,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::WallpaperFrame => {}
         Message::PowerMenu => {
-            if let Err(err) = std::process::Command::new("wlogout").spawn() {
+            if let Err(err) = system::spawn("wlogout", &[]) {
                 eprintln!("zehll: cannot start wlogout: {err}");
             }
             return close_panel(bar);
@@ -1603,7 +1616,7 @@ fn show_alert_cards(bar: &mut Bar, started: Vec<meetings::Meeting>) -> Task<Mess
 
 /// Opens a meeting's Meet link or event page in the browser.
 fn open_link(link: &str) {
-    if let Err(err) = std::process::Command::new("xdg-open").arg(link).spawn() {
+    if let Err(err) = system::spawn("xdg-open", &[link]) {
         eprintln!("zehll: cannot open {link}: {err}");
     }
 }
