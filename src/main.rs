@@ -41,6 +41,7 @@ mod todo;
 mod trail;
 mod tray;
 mod usage;
+mod wallhaven;
 mod wallpaper;
 mod workspaces;
 
@@ -71,6 +72,8 @@ const PANEL_REOPEN_DELAY: Duration = Duration::from_millis(400);
 const MEETINGS_POLL: Duration = Duration::from_secs(120);
 // Pause in typing before the Files page runs fd.
 const FILES_DEBOUNCE: Duration = Duration::from_millis(150);
+/// Wallhaven is searched once typing stops for this long.
+const WALLHAVEN_DEBOUNCE: Duration = Duration::from_millis(600);
 // Wait before opening the bar of a monitor plugged in while Zehll runs (see `set_monitors`).
 const NEW_MONITOR_DELAY: Duration = Duration::from_millis(500);
 // How often the system indicator reads /proc.
@@ -536,6 +539,22 @@ enum Message {
     // Applies a random wallpaper, once the folder is listed.
     RandomWallpaper,
     RandomWallpaperFrom(Vec<gallery::Entry>),
+    // The Wallhaven page's buttons.
+    WallhavenKey,
+    WallhavenCategory(usize),
+    WallhavenPurity(usize),
+    WallhavenSorting,
+    WallhavenOrder,
+    WallhavenReload,
+    // A result, by its position: selects it, applies it when selected, retries a failed thumbnail.
+    WallhavenClick(usize),
+    WallhavenScroll(i32),
+    // The search after typing stopped.
+    WallhavenSearch(String),
+    WallhavenResults(u64, Result<wallhaven::Results, String>),
+    WallhavenThumb(String, Option<std::path::PathBuf>),
+    // A downloaded wallpaper: its id, and its file or why it failed.
+    WallhavenFetched(String, Result<std::path::PathBuf, String>),
     // The wallpaper scaled, whether to recolor the desktop, and its sizes (`None` if unreadable).
     WallpaperPrepared(std::path::PathBuf, bool, Option<Vec<wallpaper::Scaled>>),
     // A frame of a wallpaper sliding to its new place.
@@ -1038,6 +1057,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::LauncherQuery(query) => return set_launcher_query(bar, query),
         Message::CalcAnswer(query, answer) => bar.launcher.set_answer(query, answer),
         Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Wallpapers => return gallery_nav(bar, nav),
+        Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Wallhaven => return wallhaven_nav(bar, nav),
         Message::LauncherNav(nav) => {
             let len = launcher::items(&bar.launcher).len();
             match nav {
@@ -1087,6 +1107,84 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::GalleryScroll(rows) => bar.launcher.gallery_scroll(rows),
         Message::GalleryAccent(index) => bar.launcher.gallery.accent = index,
+        Message::WallhavenKey => {
+            let browser = &mut bar.launcher.wallhaven;
+            if browser.editing_key.is_some() {
+                return wallhaven_nav(bar, launcher::Nav::Back);
+            }
+            browser.editing_key = Some(bar.launcher.query.clone());
+            // The saved key fills the field, hidden, so Enter keeps it.
+            let key = browser.filters.apikey.clone().unwrap_or_default();
+            bar.launcher.set_query(key);
+            return focus_launcher();
+        }
+        Message::WallhavenCategory(index) => {
+            bar.launcher.wallhaven.filters.toggle_category(index);
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenPurity(index) => {
+            bar.launcher.wallhaven.filters.toggle_purity(index);
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenSorting => {
+            let filters = &mut bar.launcher.wallhaven.filters;
+            filters.sorting = filters.sorting.next();
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenOrder => {
+            let filters = &mut bar.launcher.wallhaven.filters;
+            filters.descending = !filters.descending;
+            return wallhaven_filters_changed(bar);
+        }
+        Message::WallhavenReload => return wallhaven_search(bar),
+        Message::WallhavenClick(at) => {
+            let Some(wallpaper) = bar.launcher.wallhaven.results.get(at).cloned() else {
+                return Task::none();
+            };
+            if matches!(bar.launcher.wallhaven.thumbs.get(&wallpaper.id), Some(None)) {
+                bar.launcher.wallhaven.thumbs.remove(&wallpaper.id);
+                return Task::run(wallhaven::thumbnails(vec![wallpaper]), |(id, thumb)| Message::WallhavenThumb(id, thumb));
+            }
+            if at == bar.launcher.selected {
+                return wallhaven_nav(bar, launcher::Nav::Activate { secondary: false });
+            }
+            bar.launcher.wallhaven_select(at);
+        }
+        Message::WallhavenScroll(rows) => {
+            bar.launcher.wallhaven_scroll(rows);
+            let last_shown = (bar.launcher.wallhaven.first_row + wallhaven::ROWS) * wallhaven::COLUMNS - 1;
+            return wallhaven_more(bar, last_shown);
+        }
+        Message::WallhavenSearch(query) => {
+            let browser = &bar.launcher.wallhaven;
+            if query == bar.launcher.query && browser.editing_key.is_none() && bar.launcher.page() == launcher::Page::Wallhaven {
+                return wallhaven_search(bar);
+            }
+        }
+        Message::WallhavenResults(request, results) => {
+            let new: Vec<wallhaven::Wallpaper> = results.as_ref().map(|results| results.wallpapers.clone()).unwrap_or_default();
+            let first_page = results.as_ref().is_ok_and(|results| results.page <= 1);
+            if !bar.launcher.wallhaven.accept(request, results) {
+                return Task::none();
+            }
+            if first_page {
+                bar.launcher.wallhaven_select(0);
+            }
+            return Task::run(wallhaven::thumbnails(new), |(id, thumb)| Message::WallhavenThumb(id, thumb));
+        }
+        Message::WallhavenThumb(id, thumb) => {
+            bar.launcher.wallhaven.thumbs.insert(id, thumb);
+        }
+        Message::WallhavenFetched(id, result) => {
+            let browser = &mut bar.launcher.wallhaven;
+            if browser.applying.as_deref() == Some(id.as_str()) {
+                browser.applying = None;
+            }
+            match result {
+                Ok(path) => return Task::done(Message::ApplyWallpaper(path, 0)),
+                Err(error) => browser.error = Some(format!("Download failed: {error}")),
+            }
+        }
         Message::OpenWallpaperFolder => {
             let folder = gallery::folder();
             let _ = std::fs::create_dir_all(&folder);
@@ -1977,6 +2075,16 @@ fn enter_page(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
             Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
         }
         launcher::Page::Wallpapers => Task::batch([Task::perform(gallery::list(), Message::GalleryList), focus_launcher()]),
+        // Results stay between openings; the first opening searches.
+        launcher::Page::Wallhaven => {
+            let browser = &bar.launcher.wallhaven;
+            let search = match browser.results.is_empty() && !browser.loading {
+                true => wallhaven_search(bar),
+                false => Task::none(),
+            };
+            bar.launcher.wallhaven_select(0);
+            Task::batch([search, focus_launcher()])
+        }
         _ => focus_launcher(),
     }
 }
@@ -2028,6 +2136,77 @@ fn gallery_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
         launcher::Nav::Pick(_) => return Task::none(),
     }
     gallery_colors(bar)
+}
+
+/// Keys on the Wallhaven page: like the Wallpapers grid, Ctrl+Enter also keeps the download in
+/// the wallpaper folder. While the API key is typed, Enter saves it and Shift+Escape cancels.
+fn wallhaven_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
+    if let Some(search) = bar.launcher.wallhaven.editing_key.clone() {
+        let entered = bar.launcher.query.trim().to_owned();
+        bar.launcher.wallhaven.editing_key = None;
+        bar.launcher.set_query(search);
+        return match nav {
+            launcher::Nav::Activate { .. } => {
+                let filters = &mut bar.launcher.wallhaven.filters;
+                filters.apikey = Some(entered).filter(|key| !key.is_empty());
+                if !filters.has_key() {
+                    filters.purity = [true, false, false];
+                }
+                Task::batch([wallhaven_filters_changed(bar), focus_launcher()])
+            }
+            launcher::Nav::Close => close_launcher(bar),
+            _ => focus_launcher(),
+        };
+    }
+    match nav {
+        launcher::Nav::Close => return close_launcher(bar),
+        launcher::Nav::Back => {
+            if !bar.launcher.back() {
+                return close_launcher(bar);
+            }
+            return Task::batch([resize_launcher(bar), focus_launcher()]);
+        }
+        launcher::Nav::Move(rows) => bar.launcher.wallhaven_move(rows * wallhaven::COLUMNS as i32),
+        launcher::Nav::Sideways(delta) => bar.launcher.wallhaven_move(delta),
+        launcher::Nav::Activate { secondary } => {
+            let browser = &mut bar.launcher.wallhaven;
+            let Some(wallpaper) = browser.results.get(bar.launcher.selected).cloned() else {
+                return Task::none();
+            };
+            browser.applying = Some(wallpaper.id.clone());
+            browser.error = None;
+            let id = wallpaper.id.clone();
+            return Task::perform(wallhaven::fetch(wallpaper, gallery::folder(), secondary), move |result| Message::WallhavenFetched(id.clone(), result));
+        }
+        launcher::Nav::Accent(_) | launcher::Nav::Random | launcher::Nav::Pick(_) => return Task::none(),
+    }
+    let selected = bar.launcher.selected;
+    wallhaven_more(bar, selected)
+}
+
+/// A new first page for the search and filters.
+fn wallhaven_search(bar: &mut Bar) -> Task<Message> {
+    let request = bar.launcher.wallhaven.begin();
+    let url = wallhaven::search_url(&bar.launcher.query, &bar.launcher.wallhaven.filters, 1);
+    Task::perform(wallhaven::search(url), move |results| Message::WallhavenResults(request, results))
+}
+
+/// The next page, when `index` is close to the end of the results.
+fn wallhaven_more(bar: &mut Bar, index: usize) -> Task<Message> {
+    if !bar.launcher.wallhaven.near_end(index) {
+        return Task::none();
+    }
+    let Some((request, page)) = bar.launcher.wallhaven.begin_more() else {
+        return Task::none();
+    };
+    let url = wallhaven::search_url(&bar.launcher.query, &bar.launcher.wallhaven.filters, page);
+    Task::perform(wallhaven::search(url), move |results| Message::WallhavenResults(request, results))
+}
+
+/// Saves the filters and searches again with them.
+fn wallhaven_filters_changed(bar: &mut Bar) -> Task<Message> {
+    wallpaper::save_section("wallhaven", bar.launcher.wallhaven.filters.to_json());
+    wallhaven_search(bar)
 }
 
 /// Asks matugen for the selected wallpaper's colors, unless they are known.
@@ -2103,6 +2282,12 @@ fn set_launcher_query(bar: &mut Bar, query: String) -> Task<Message> {
     // The search moves the selection to the first matching wallpaper.
     if bar.launcher.page() == launcher::Page::Wallpapers {
         return gallery_colors(bar);
+    }
+    if bar.launcher.page() == launcher::Page::Wallhaven {
+        return match bar.launcher.wallhaven.editing_key {
+            Some(_) => Task::none(),
+            None => Task::perform(tokio::time::sleep(WALLHAVEN_DEBOUNCE), move |()| Message::WallhavenSearch(query.clone())),
+        };
     }
     if query.trim().is_empty() {
         return load_preview(bar);

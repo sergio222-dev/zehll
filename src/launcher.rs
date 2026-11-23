@@ -8,7 +8,7 @@ use iced::{Alignment, Border, Color, Element, Font, Length, Padding, mouse};
 
 use crate::apps::{self, App, Score};
 use crate::keybinds::Keybind;
-use crate::{calc, clipboard, files, fuzzy, gallery, tray};
+use crate::{calc, clipboard, files, fuzzy, gallery, tray, wallhaven};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
@@ -34,6 +34,7 @@ pub const GALLERY_SIZE: (u32, u32) = (1040, 640);
 const TILE_HEIGHT: f32 = 146.0;
 const TILE_GAP: f32 = 12.0;
 const ACCENT_HEIGHT: f32 = 58.0;
+const WALLHAVEN_TILE_HEIGHT: f32 = 150.0;
 // Search bar, list and footer, plus the two dividers.
 pub const HEIGHT: u32 = (SEARCH_HEIGHT + SECTION_HEIGHT + ROW_HEIGHT * VISIBLE_ROWS as f32 + LIST_PADDING + FOOTER_HEIGHT + 2.0) as u32;
 
@@ -45,11 +46,12 @@ pub enum Page {
     Keybinds,
     Calculator,
     Wallpapers,
+    Wallhaven,
 }
 
 impl Page {
     /// Pages opened from Home, in the order Home lists them.
-    const CHILDREN: [Page; 5] = [Page::Files, Page::Clipboard, Page::Keybinds, Page::Calculator, Page::Wallpapers];
+    const CHILDREN: [Page; 6] = [Page::Files, Page::Clipboard, Page::Keybinds, Page::Calculator, Page::Wallpapers, Page::Wallhaven];
 
     /// Label of the search bar chip.
     pub fn chip(self) -> &'static str {
@@ -60,6 +62,7 @@ impl Page {
             Page::Keybinds => "KEYS",
             Page::Calculator => "CALC",
             Page::Wallpapers => "WALLPAPERS",
+            Page::Wallhaven => "WALLHAVEN",
         }
     }
 
@@ -72,6 +75,7 @@ impl Page {
             Page::Keybinds => "keyboard",
             Page::Calculator => "calculate",
             Page::Wallpapers => "wallpaper",
+            Page::Wallhaven => "travel_explore",
         }
     }
 
@@ -83,6 +87,7 @@ impl Page {
             Page::Keybinds => "Search keybindings",
             Page::Calculator => "Do math, convert units, or search past calculations",
             Page::Wallpapers => "Filter wallpapers by name",
+            Page::Wallhaven => "Search wallpapers on Wallhaven",
         }
     }
 
@@ -94,6 +99,7 @@ impl Page {
             Page::Keybinds => "Keybinds",
             Page::Calculator => "Calculator",
             Page::Wallpapers => "Wallpapers",
+            Page::Wallhaven => "Wallhaven",
         }
     }
 
@@ -105,6 +111,7 @@ impl Page {
             Page::Keybinds => "Hyprland keybindings",
             Page::Calculator => "Math, units and currency",
             Page::Wallpapers => "Desktop wallpaper and accent color",
+            Page::Wallhaven => "Search and download wallpapers",
         }
     }
 }
@@ -236,6 +243,7 @@ pub fn empty_text(page: Page) -> &'static str {
     match page {
         Page::Calculator => "NO MATCHING HISTORY",
         Page::Wallpapers => "NO WALLPAPERS IN ~/Pictures/Wallpapers",
+        Page::Wallhaven => "NO RESULTS",
         Page::Home | Page::Files | Page::Clipboard | Page::Keybinds => "NO RESULTS",
     }
 }
@@ -264,7 +272,7 @@ pub fn items(launcher: &Launcher) -> Vec<Item> {
         Page::Files => file_items(launcher),
         Page::Clipboard => clip_items(launcher),
         // A grid of tiles, not rows: see `gallery_body`.
-        Page::Wallpapers => Vec::new(),
+        Page::Wallpapers | Page::Wallhaven => Vec::new(),
     }
 }
 
@@ -534,6 +542,7 @@ pub fn hints(page: Page) -> &'static [(&'static str, &'static str)] {
         Page::Files => &[("↵", "open"), ("^↵", "path"), ("⇧ESC", "back")],
         Page::Clipboard => &[("↵", "copy"), ("^↵", "pin"), ("⇧ESC", "back")],
         Page::Wallpapers => &[("↑↓←→", "move"), ("↵", "apply"), ("^R", "random"), ("ALT ←→", "accent"), ("⇧ESC", "back")],
+        Page::Wallhaven => &[("↑↓←→", "move"), ("↵", "apply"), ("^↵", "save + apply"), ("⇧ESC", "back")],
     }
 }
 
@@ -558,7 +567,13 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     )
     .padding(Padding { top: 0.0, right: 26.0, bottom: 0.0, left: 16.0 })
     .center_y(Length::Fill);
-    let input = text_input(page.placeholder(), &launcher.query)
+    let editing_key = page == Page::Wallhaven && launcher.wallhaven.editing_key.is_some();
+    let placeholder = match editing_key {
+        true => "Paste your Wallhaven API key · Enter saves it, empty removes it",
+        false => page.placeholder(),
+    };
+    let input = text_input(placeholder, &launcher.query)
+        .secure(editing_key)
         .id(input_id())
         .on_input(Message::LauncherQuery)
         .font(BODY_FONT)
@@ -592,6 +607,10 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         search = search.push(bracket_button(theme, "shuffle", theme.text, Message::LauncherNav(Nav::Random)));
         search = search.push(bracket_button(theme, "folder_open", theme.text, Message::OpenWallpaperFolder));
     }
+    if page == Page::Wallhaven {
+        let color = if editing_key || launcher.wallhaven.filters.has_key() { theme.accent } else { theme.text };
+        search = search.push(bracket_button(theme, "key", color, Message::WallhavenKey));
+    }
     let search = search
         .spacing(14)
         .align_y(Alignment::Center)
@@ -624,6 +643,7 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     };
     let body: Element<'_, Message> = match launcher.answer().filter(|_| page == Page::Calculator) {
         _ if page == Page::Wallpapers => gallery_body(theme, launcher, bar.wallpaper.path.as_deref()),
+        _ if page == Page::Wallhaven => wallhaven_body(theme, launcher),
         Some(answer) => column![answer_card(theme, answer), header, list].height(Length::Fill).into(),
         None if has_preview(page) => {
             let divider = container(Space::new()).width(1).height(Length::Fill).style(move |_| container::background(theme.border));
@@ -671,18 +691,22 @@ fn gallery_body<'a>(theme: crate::theme::Theme, launcher: &'a Launcher, current:
         return container(text(empty).font(CONDENSED_BOLD).size(14).color(theme.text_muted)).center(Length::Fill).into();
     }
     let first = launcher.gallery.first_row * gallery::COLUMNS;
-    let tiles: Vec<(usize, &gallery::Entry)> =
-        shown.iter().enumerate().skip(first).take(gallery::COLUMNS * gallery::ROWS).map(|(at, &index)| (at, &launcher.gallery.entries[index])).collect();
-    let rows = Column::with_children(tiles.chunks(gallery::COLUMNS).map(|chunk| {
-        let mut cells: Vec<Element<'a, Message>> =
-            chunk.iter().map(|&(at, entry)| tile(theme, launcher, entry, at, current == Some(entry.path.as_path()))).collect();
-        // A short last row keeps the tiles' width.
-        while cells.len() < gallery::COLUMNS {
-            cells.push(Space::new().width(Length::Fill).into());
-        }
-        Row::with_children(cells).spacing(TILE_GAP).into()
-    }))
-    .spacing(TILE_GAP);
+    let tiles = shown.iter().enumerate().skip(first).take(gallery::COLUMNS * gallery::ROWS).map(|(at, &index)| {
+        let entry = &launcher.gallery.entries[index];
+        let tile = Tile {
+            thumb: launcher.gallery.thumbs.get(&entry.path).map(|thumb| thumb.as_path()),
+            placeholder: "",
+            name: entry.name.clone(),
+            size: entry.size,
+            selected: at == launcher.selected,
+            current: current == Some(entry.path.as_path()),
+            busy: false,
+            height: TILE_HEIGHT,
+            on_press: Message::GalleryClick(at),
+        };
+        grid_tile(theme, tile)
+    });
+    let rows = tile_rows(tiles.collect(), gallery::COLUMNS);
     let grid = mouse_area(container(rows).padding([14, 16]).height(Length::Fill)).on_scroll(|delta| {
         let rows = match delta {
             mouse::ScrollDelta::Lines { y, .. } => -y.signum() as i32,
@@ -713,16 +737,121 @@ fn gallery_body<'a>(theme: crate::theme::Theme, launcher: &'a Launcher, current:
     column![grid, line(theme.border), strip].height(Length::Fill).into()
 }
 
-/// One wallpaper: its thumbnail (or a placeholder while it is made), name and size.
-fn tile<'a>(theme: crate::theme::Theme, launcher: &'a Launcher, entry: &'a gallery::Entry, at: usize, current: bool) -> Element<'a, Message> {
-    let picture: Element<'a, Message> = match launcher.gallery.thumbs.get(&entry.path) {
-        Some(thumb) => image(image::Handle::from_path(thumb)).width(Length::Fill).height(Length::Fill).content_fit(iced::ContentFit::Cover).into(),
-        None => container(Space::new()).width(Length::Fill).height(Length::Fill).style(move |_| container::background(theme.section_background)).into(),
+/// The Wallhaven page: the filters, then the results, 3 x 3 at a time.
+fn wallhaven_body<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Element<'a, Message> {
+    let browser = &launcher.wallhaven;
+    let filters = &browser.filters;
+    let toggle = |label: &'static str, on: bool, enabled: bool, message: Message| -> Element<'a, Message> {
+        let (background, color, border) = match (on, enabled) {
+            (true, _) => (theme.accent, theme.on_accent, theme.accent),
+            (false, true) => (Color::TRANSPARENT, theme.text_muted, theme.border),
+            (false, false) => (Color::TRANSPARENT, theme.text_dim, Color { a: 0.5, ..theme.border }),
+        };
+        let chip = container(text(label).font(CONDENSED_BOLD).size(13).color(color)).padding([0, 10]).height(28).center_y(28).style(move |_| container::Style {
+            background: Some(background.into()),
+            border: Border { color: border, width: 1.0, radius: 0.0.into() },
+            ..Default::default()
+        });
+        let chip = button(chip).padding(0).style(|_, _| button::Style::default());
+        match enabled {
+            true => chip.on_press(message).into(),
+            false => chip.into(),
+        }
     };
-    let size = entry.size.map(|(w, h)| format!("{w} × {h}")).unwrap_or_default();
+    let separator = || container(Space::new()).width(1).height(22).style(move |_| container::background(theme.border));
+    let mut bar = row![].spacing(8).align_y(Alignment::Center);
+    for (index, label) in ["GENERAL", "ANIME", "PEOPLE"].into_iter().enumerate() {
+        bar = bar.push(toggle(label, filters.categories[index], true, Message::WallhavenCategory(index)));
+    }
+    bar = bar.push(separator());
+    for (index, label) in ["SFW", "SKETCHY", "NSFW"].into_iter().enumerate() {
+        bar = bar.push(toggle(label, filters.purity[index], index == 0 || filters.has_key(), Message::WallhavenPurity(index)));
+    }
+    bar = bar.push(separator());
+    bar = bar.push(toggle(filters.sorting.label(), false, true, Message::WallhavenSorting));
+    let order = if filters.descending { "arrow_downward" } else { "arrow_upward" };
+    bar = bar.push(bracket_button(theme, order, theme.text, Message::WallhavenOrder));
+    bar = bar.push(bracket_button(theme, "refresh", theme.text, Message::WallhavenReload));
+    bar = bar.push(Space::new().width(Length::Fill));
+    if browser.last_page > 0 {
+        let pages = format!("PAGE {} / {}", browser.page, browser.last_page);
+        bar = bar.push(text(pages).font(CONDENSED_BOLD).size(12).color(theme.text_muted));
+    }
+    let bar = container(bar).padding([0, 16]).height(46).center_y(46);
+
+    let status = match (&browser.error, browser.loading, browser.results.is_empty()) {
+        (Some(error), _, true) => Some(error.to_uppercase()),
+        (None, true, true) => Some(String::from("SEARCHING…")),
+        (None, false, true) => Some(String::from(empty_text(Page::Wallhaven))),
+        _ => None,
+    };
+    let grid: Element<'a, Message> = match status {
+        Some(status) => container(text(status).font(CONDENSED_BOLD).size(14).color(theme.text_muted)).center(Length::Fill).into(),
+        None => {
+            let first = browser.first_row * wallhaven::COLUMNS;
+            let tiles = browser.results.iter().enumerate().skip(first).take(wallhaven::COLUMNS * wallhaven::ROWS).map(|(at, wallpaper)| {
+                let thumb = browser.thumbs.get(&wallpaper.id);
+                let tile = Tile {
+                    thumb: thumb.and_then(|thumb| thumb.as_deref()),
+                    placeholder: if matches!(thumb, Some(None)) { "CLICK TO RETRY" } else { "LOADING" },
+                    name: format!("{}.{}", wallpaper.id, wallpaper.file_name().rsplit('.').next().unwrap_or("")),
+                    size: wallpaper.size,
+                    selected: at == launcher.selected,
+                    current: false,
+                    busy: browser.applying.as_deref() == Some(wallpaper.id.as_str()),
+                    height: WALLHAVEN_TILE_HEIGHT,
+                    on_press: Message::WallhavenClick(at),
+                };
+                grid_tile(theme, tile)
+            });
+            let rows = tile_rows(tiles.collect(), wallhaven::COLUMNS);
+            mouse_area(container(rows).padding([14, 16]).height(Length::Fill))
+                .on_scroll(|delta| {
+                    let rows = match delta {
+                        mouse::ScrollDelta::Lines { y, .. } => -y.signum() as i32,
+                        mouse::ScrollDelta::Pixels { y, .. } => -(y / WALLHAVEN_TILE_HEIGHT).round() as i32,
+                    };
+                    Message::WallhavenScroll(rows)
+                })
+                .into()
+        }
+    };
+    let mut body = column![bar, line(theme.border), grid].height(Length::Fill);
+    // An error after some results (a later page, a download) shows under them.
+    if let (Some(error), false) = (&browser.error, browser.results.is_empty()) {
+        body = body.push(container(text(error.as_str()).font(BODY_FONT).size(12).color(theme.accent)).padding([6, 18]));
+    }
+    body.into()
+}
+
+/// What a grid tile shows.
+struct Tile<'a> {
+    thumb: Option<&'a std::path::Path>,
+    /// Over an empty tile: still loading, or how to retry.
+    placeholder: &'static str,
+    name: String,
+    size: Option<(u32, u32)>,
+    selected: bool,
+    current: bool,
+    /// A bar under the label while the full image downloads.
+    busy: bool,
+    height: f32,
+    on_press: Message,
+}
+
+/// One wallpaper: its thumbnail (or a placeholder while it is made), name and size.
+fn grid_tile<'a>(theme: crate::theme::Theme, tile: Tile<'a>) -> Element<'a, Message> {
+    let picture: Element<'a, Message> = match tile.thumb {
+        Some(thumb) => image(image::Handle::from_path(thumb)).width(Length::Fill).height(Length::Fill).content_fit(iced::ContentFit::Cover).into(),
+        None => container(text(tile.placeholder).font(CONDENSED_BOLD).size(12).color(theme.text_dim))
+            .center(Length::Fill)
+            .style(move |_| container::background(theme.section_background))
+            .into(),
+    };
+    let size = tile.size.map(|(w, h)| format!("{w} × {h}")).unwrap_or_default();
     let label = container(
         row![
-            text(entry.name.as_str()).font(CONDENSED_BOLD).size(12).color(theme.text).wrapping(text::Wrapping::None),
+            text(tile.name).font(CONDENSED_BOLD).size(12).color(theme.text).wrapping(text::Wrapping::None),
             Space::new().width(Length::Fill),
             text(size).font(BODY_FONT).size(11).color(theme.text_muted),
         ]
@@ -734,21 +863,39 @@ fn tile<'a>(theme: crate::theme::Theme, launcher: &'a Launcher, entry: &'a galle
     .width(Length::Fill)
     .center_y(26)
     .style(move |_| container::background(Color { a: 0.85, ..theme.popup_background }));
-    let mut layers = Stack::new().push(picture).push(container(label).height(Length::Fill).align_bottom(Length::Fill));
-    if current {
+    let mut bottom = column![];
+    if tile.busy {
+        bottom = bottom.push(container(Space::new()).width(Length::Fill).height(3).style(move |_| container::background(theme.accent)));
+    }
+    let bottom = bottom.push(label);
+    let mut layers = Stack::new().push(picture).push(container(bottom).height(Length::Fill).align_bottom(Length::Fill));
+    if tile.current {
         let tag = container(text("CURRENT").font(CONDENSED_HEAVY).size(12).color(theme.on_accent)).padding(Padding { top: 1.0, right: 14.0, bottom: 1.0, left: 8.0 });
         layers = layers.push(container(slanted(tag, 7.0, theme.accent)).padding(8));
     }
-    let selected = at == launcher.selected;
-    let outline = if selected { theme.glow } else { theme.border };
-    let width = if selected { 2.0 } else { 1.0 };
+    let outline = if tile.selected { theme.glow } else { theme.border };
+    let width = if tile.selected { 2.0 } else { 1.0 };
     // On top: a container's own border is covered by its content.
     let frame = container(Space::new()).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
         border: Border { color: outline, width, radius: 0.0.into() },
         ..Default::default()
     });
-    let framed = container(layers.push(frame)).width(Length::Fill).height(TILE_HEIGHT).clip(true);
-    mouse_area(framed).on_press(Message::GalleryClick(at)).interaction(mouse::Interaction::Pointer).into()
+    let framed = container(layers.push(frame)).width(Length::Fill).height(tile.height).clip(true);
+    mouse_area(framed).on_press(tile.on_press).interaction(mouse::Interaction::Pointer).into()
+}
+
+/// Rows of `columns` tiles, the last one padded so its tiles keep their width.
+fn tile_rows<'a>(tiles: Vec<Element<'a, Message>>, columns: usize) -> Element<'a, Message> {
+    let mut rows = Vec::new();
+    let mut tiles = tiles.into_iter().peekable();
+    while tiles.peek().is_some() {
+        let mut cells: Vec<Element<'a, Message>> = tiles.by_ref().take(columns).collect();
+        while cells.len() < columns {
+            cells.push(Space::new().width(Length::Fill).into());
+        }
+        rows.push(Row::with_children(cells).spacing(TILE_GAP).into());
+    }
+    Column::with_children(rows).spacing(TILE_GAP).into()
 }
 
 /// The expression as qalc read it, then the result, as in the design's result card.
@@ -866,7 +1013,7 @@ pub enum Nav {
 /// Surface size of the launcher on `page`.
 pub fn size(page: Page) -> (u32, u32) {
     match page {
-        Page::Wallpapers => GALLERY_SIZE,
+        Page::Wallpapers | Page::Wallhaven => GALLERY_SIZE,
         _ => (WIDTH, HEIGHT),
     }
 }
@@ -916,6 +1063,8 @@ pub struct Launcher {
     decoded: HashMap<u64, clipboard::Decoded>,
     /// The Wallpapers page.
     pub gallery: gallery::Gallery,
+    /// The Wallhaven page.
+    pub wallhaven: wallhaven::Browser,
 }
 
 impl Launcher {
@@ -944,13 +1093,16 @@ impl Launcher {
             pinned_only: false,
             decoded: HashMap::new(),
             gallery: gallery::Gallery::default(),
+            wallhaven: wallhaven::Browser::default(),
         }
     }
 
     /// With the saved launch scores, calculator history and home folder.
     pub fn load() -> Self {
         let home = std::env::var("HOME").unwrap_or_default();
-        Self { scores: apps::load_scores(), history: calc::load_history(), pins: clipboard::load_pins(), home, ..Self::new() }
+        let mut launcher = Self { scores: apps::load_scores(), history: calc::load_history(), pins: clipboard::load_pins(), home, ..Self::new() };
+        launcher.wallhaven.filters = wallhaven::Filters::parse(&crate::wallpaper::load_section("wallhaven"));
+        launcher
     }
 
     /// The calculator's answer, if it is for the current search.
@@ -1122,6 +1274,23 @@ impl Launcher {
         }
         self.selected = index;
         self.gallery.first_row = gallery::first_row(index, self.gallery.first_row, gallery::ROWS, gallery::COLUMNS);
+    }
+
+    /// Moves the selection among Wallhaven's results, scrolling by rows to keep it shown.
+    pub fn wallhaven_move(&mut self, delta: i32) {
+        let len = self.wallhaven.results.len();
+        self.wallhaven_select(gallery::step(self.selected, delta, len));
+    }
+
+    pub fn wallhaven_select(&mut self, index: usize) {
+        self.selected = index;
+        self.wallhaven.first_row = gallery::first_row(index, self.wallhaven.first_row, wallhaven::ROWS, wallhaven::COLUMNS);
+    }
+
+    pub fn wallhaven_scroll(&mut self, rows: i32) {
+        let len = self.wallhaven.results.len();
+        let last = len.div_ceil(wallhaven::COLUMNS).saturating_sub(wallhaven::ROWS) as i64;
+        self.wallhaven.first_row = (self.wallhaven.first_row as i64 + rows as i64).clamp(0, last) as usize;
     }
 
     /// Scrolls the grid by rows, keeping the selection where it is.
@@ -1357,6 +1526,7 @@ mod tests {
     #[test]
     fn the_wallpapers_page_is_a_larger_surface() {
         assert_eq!(size(Page::Wallpapers), (1040, 640));
+        assert_eq!(size(Page::Wallhaven), (1040, 640));
         assert_eq!(size(Page::Home), (WIDTH, HEIGHT));
         assert_eq!(size(Page::Files), (WIDTH, HEIGHT));
     }
@@ -1395,12 +1565,12 @@ mod tests {
     fn home_lists_apps_then_pages_then_commands() {
         assert_eq!(
             titles(&with_apps()),
-            ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Wallpapers", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
+            ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Wallpapers", "Wallhaven", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
         );
         let items = items(&with_apps());
         assert_eq!((items[0].tag.as_str(), &items[0].action), ("APPLICATION", &Action::App(0)));
         assert_eq!((items[3].tag.as_str(), &items[3].action), ("PAGE", &Action::Open(Page::Files)));
-        assert_eq!((items[12].tag.as_str(), &items[12].action), ("COMMAND", &Action::Power(Power::Shutdown)));
+        assert_eq!((items[13].tag.as_str(), &items[13].action), ("COMMAND", &Action::Power(Power::Shutdown)));
     }
 
     #[test]

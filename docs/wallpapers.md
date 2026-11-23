@@ -35,7 +35,18 @@ hl.bind("CTRL + SUPER + ALT + T", hl.dsp.global("zehll:wallpaperRandom"), { desc
 
 The ACCENT strip shows the colors matugen can build the theme from (`--show-source-colors`); applying runs `matugen image <wallpaper> --mode dark --source-color-index <accent>`, which also rewrites [Zehll's theme](theme.md). The folder button opens the wallpaper folder.
 
+## The Wallhaven page
+
+Pick **Wallhaven** in Home to search [wallhaven.cc](https://wallhaven.cc). The search runs 600 ms after typing stops; scrolling or moving near the end loads the next page of 24.
+
+- The filter bar toggles the categories (General, Anime, People) and the purity (SFW, Sketchy, NSFW), cycles the sorting (date added, relevance, random, views, favorites, toplist of the last month), flips the order and searches again. At least one category and one purity stay on.
+- Sketchy and NSFW need an API key from your wallhaven account settings. The key button turns the search field into a hidden key field: Enter saves it, an empty field removes it, Shift+Escape cancels.
+- Enter (or a click on the selected result) downloads the full image to `~/.cache/zehll/wallhaven/full` and applies it; Ctrl+Enter downloads it to the wallpaper folder as `wallhaven-<id>.<ext>`, so it stays in the Wallpapers page. A failed thumbnail retries on click.
+
+The filters and the key are kept in `~/.local/state/zehll/wallpapers.json` under `wallhaven`; thumbnails are cached in `~/.cache/zehll/wallhaven/thumbs`.
+
 ## Requirements
 
 - matugen
+- curl, for Wallhaven
 - `xdg-user-dir` to find the Pictures folder

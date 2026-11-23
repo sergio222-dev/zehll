@@ -47,6 +47,7 @@ Type to search; the list is fuzzy matched. Up/Down, Tab/Shift+Tab, Ctrl+J/K and 
 - **Keybinds** lists every Hyprland keybinding that has a description, searchable by keys or description.
 - **Calculator** evaluates the search with qalc as you type: math, units and currencies. Enter copies the result and keeps it in a history of 25 (`~/.local/state/zehll/calculator.json`); Ctrl+Enter puts `(result)` back in the search; Tab walks the history and Enter on a past calculation reuses it.
 - **Wallpapers** shows the wallpaper folder as a grid and applies the selected one with its accent color; see [Wallpapers](wallpapers.md).
+- **Wallhaven** searches wallhaven.cc with its filters and applies or keeps a result; see [Wallpapers](wallpapers.md#the-wallhaven-page).
 
 The launcher uses the layer namespaces `zehll-launcher` and `zehll-launcher-catcher`. Hyprland fades and slides layers in and out by default; to open and close the launcher instantly, turn that off for both:
 

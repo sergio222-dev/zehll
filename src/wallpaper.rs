@@ -218,17 +218,34 @@ fn read_state_file() -> serde_json::Value {
     std::fs::read_to_string(state_file()).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
 
+/// A section of the state file kept by another feature, like the Wallhaven filters.
+pub fn load_section(name: &str) -> serde_json::Value {
+    read_state_file()[name].take()
+}
+
+pub fn save_section(name: &str, value: serde_json::Value) {
+    let mut file = match read_state_file() {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    file.insert(name.to_owned(), value);
+    write_state_file(serde_json::Value::Object(file));
+}
+
+fn write_state_file(content: serde_json::Value) {
+    let path = state_file();
+    let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, content.to_string()));
+    if let Err(err) = result {
+        eprintln!("zehll: cannot save {}: {err}", path.display());
+    }
+}
+
 pub fn load() -> State {
     State::parse(&read_state_file())
 }
 
 pub fn save(state: &State) {
-    let path = state_file();
-    let content = state.merge_into(read_state_file()).to_string();
-    let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, content));
-    if let Err(err) = result {
-        eprintln!("zehll: cannot save {}: {err}", path.display());
-    }
+    write_state_file(state.merge_into(read_state_file()));
 }
 
 /// Every monitor's name and physical size.
