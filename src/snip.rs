@@ -8,17 +8,19 @@ use std::sync::Arc;
 use chrono::NaiveDateTime;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
 use iced::widget::image::{FilterMethod, Handle};
-use iced::widget::{Space, Stack, image};
+use iced::widget::{Space, Stack, button, container, image, row, text};
 use iced::window::Id;
-use iced::{Color, ContentFit, Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, keyboard, mouse};
+use iced::{Alignment, Border, Color, ContentFit, Element, Font, Length, Padding, Pixels, Point, Rectangle, Renderer, Shadow, Size, Theme, keyboard, mouse};
 use ::image::RgbaImage;
 use tokio::io::AsyncWriteExt;
 
-use crate::{Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, hyprland, theme};
+use crate::{Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, hyprland, icon_sized, panel_style, shape, slanted, theme};
 
 /// A press and release closer than this, in logical pixels, is a click.
 const CLICK_SLOP: f32 = 4.0;
 const DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 };
+const TOOLBAR_HEIGHT: f32 = 40.0;
+const KEY_BORDER: Color = Color::from_rgb8(0x3a, 0x48, 0x70);
 // Text on the glow-colored window tag.
 const ON_GLOW: Color = Color::from_rgb8(0x04, 0x12, 0x1a);
 
@@ -296,7 +298,7 @@ async fn screenshots_dir() -> PathBuf {
     pictures.join("Screenshots")
 }
 
-/// The frozen frame under the selection overlay.
+/// The frozen frame, the selection overlay and, on the focused monitor, the toolbar.
 pub fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
     let Some(shot) = bar.snips.get(&id) else {
         return Space::new().into();
@@ -307,7 +309,79 @@ pub fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         .content_fit(ContentFit::Fill)
         .filter_method(FilterMethod::Linear);
     let overlay = canvas(Overlay { id, shot, theme: bar.theme }).width(Length::Fill).height(Length::Fill);
-    Stack::new().push(frame).push(overlay).into()
+    let mut layers = Stack::new().push(frame).push(overlay);
+    if shot.monitor.focused {
+        layers = layers.push(
+            container(toolbar(bar))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Alignment::Center)
+                .align_y(Alignment::End)
+                .padding(Padding::ZERO.bottom(16.0)),
+        );
+    }
+    layers.into()
+}
+
+fn toolbar(bar: &Bar) -> Element<'_, Message> {
+    let theme = bar.theme;
+    let chip = container(
+        row![icon_sized("crop_free", 18.0), text("SNIP").font(CONDENSED_HEAVY).size(18)]
+            .spacing(8)
+            .align_y(Alignment::Center),
+    )
+    .padding(Padding { top: 0.0, right: 26.0, bottom: 0.0, left: 14.0 })
+    .center_y(TOOLBAR_HEIGHT)
+    .style(move |_| container::Style { text_color: Some(theme.on_accent), ..Default::default() });
+    let hint = |key: &'static str, what: &'static str| {
+        let key = container(text(key).font(Font::MONOSPACE).size(11).color(theme.text)).padding([1, 6]).style(|_| container::Style {
+            border: Border { color: KEY_BORDER, width: 1.0, radius: 0.0.into() },
+            ..Default::default()
+        });
+        row![key, text(what).size(13).color(theme.text_muted)].spacing(6).align_y(Alignment::Center)
+    };
+    let on = bar.snip_save;
+    let diamond: Element<'_, Message> = match on {
+        true => container(shape(shape::Kind::Diamond, theme.accent)).width(14).height(14).into(),
+        false => container(shape(shape::Kind::Diamond, theme.text_dim)).width(14).height(14).into(),
+    };
+    let save = button(row![diamond, text("SAVE").font(CONDENSED_BOLD).size(15)].spacing(6).align_y(Alignment::Center))
+        .on_press(Message::ToggleSnipSave)
+        .padding([4, 8])
+        .style(move |_, status| button::Style {
+            text_color: if on { theme.text } else { theme.text_muted },
+            background: matches!(status, button::Status::Hovered | button::Status::Pressed).then(|| Color { a: 0.12, ..theme.glow }.into()),
+            ..Default::default()
+        });
+    let close = button(container(icon_sized("close", 16.0)).center(26))
+        .on_press(Message::CancelSnip)
+        .padding(0)
+        .style(move |_, status| button::Style {
+            text_color: theme.text,
+            border: Border {
+                color: if matches!(status, button::Status::Hovered | button::Status::Pressed) { theme.glow } else { KEY_BORDER },
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        });
+    let content = row![
+        slanted(chip, 12.0, theme.accent),
+        hint("LMB", "copy"),
+        hint("RMB", "edit"),
+        hint("ESC", "cancel"),
+        save,
+        close,
+    ]
+    .spacing(16)
+    .height(TOOLBAR_HEIGHT)
+    .align_y(Alignment::Center);
+    container(container(content).padding(Padding::ZERO.right(8.0)))
+        .style(move |_| container::Style {
+            shadow: Shadow { color: Color { a: 0.55, ..Color::BLACK }, blur_radius: 28.0, offset: iced::Vector::new(0.0, 10.0) },
+            ..panel_style(theme)
+        })
+        .into()
 }
 
 /// Draws the dim, the targets and the selection, and turns the pointer into a selection.

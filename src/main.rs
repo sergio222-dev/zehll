@@ -218,6 +218,7 @@ struct Bar {
     snips: HashMap<Id, snip::Shot>,
     // The monitors are being captured; the selector opens once they are.
     snip_capturing: bool,
+    snip_save: bool,
 }
 
 struct Popup {
@@ -332,6 +333,7 @@ impl Bar {
             launcher_surface: None,
             snips: HashMap::new(),
             snip_capturing: false,
+            snip_save: state.snip_save,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -354,6 +356,7 @@ impl Bar {
             night_temperature: self.night_temperature,
             night_automatic: self.night_automatic,
             content_adjustment: self.content_adjustment,
+            snip_save: self.snip_save,
         }
         .save();
     }
@@ -495,6 +498,7 @@ enum Message {
     // The selection on a snip surface, and whether it goes to the editor.
     Snip(Id, snip::Rect, bool),
     CancelSnip,
+    ToggleSnipSave,
 }
 
 fn namespace() -> String {
@@ -1261,7 +1265,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             };
             let frame = shot.frame.clone();
             let area = snip::crop(rect, shot.monitor.scale, frame.dimensions());
-            let action = if edit { snip::Action::Edit } else { snip::Action::Copy { save: false } };
+            let action = if edit { snip::Action::Edit } else { snip::Action::Copy { save: bar.snip_save } };
             let close = close_snip(bar);
             return match area {
                 Some(area) => Task::batch([close, Task::future(snip::deliver(frame, area, action)).discard()]),
@@ -1269,6 +1273,10 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             };
         }
         Message::CancelSnip => return close_snip(bar),
+        Message::ToggleSnipSave => {
+            bar.snip_save = !bar.snip_save;
+            bar.save_state();
+        }
         Message::PowerMenu => {
             if let Err(err) = std::process::Command::new("wlogout").spawn() {
                 eprintln!("zehll: cannot start wlogout: {err}");
