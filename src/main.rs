@@ -74,6 +74,8 @@ const NEW_MONITOR_DELAY: Duration = Duration::from_millis(500);
 // How often the system indicator reads /proc.
 const USAGE_INTERVAL: Duration = Duration::from_secs(2);
 const PILL_BACKGROUND: Color = Color::from_rgb8(0x0d, 0x14, 0x30);
+// Time for closing popovers to leave the screen before the snip freezes it.
+const SNIP_SETTLE: Duration = Duration::from_millis(150);
 
 const ICON_FONT: Font = Font::with_name("Material Symbols Rounded");
 const BODY_FONT: Font = Font::with_name("Barlow");
@@ -212,6 +214,10 @@ struct Bar {
     launcher: launcher::Launcher,
     // Launcher surface and its click catcher.
     launcher_surface: Option<OpenPanel>,
+    // Snip selector surfaces, one per monitor, and the frame each froze.
+    snips: HashMap<Id, snip::Shot>,
+    // The monitors are being captured; the selector opens once they are.
+    snip_capturing: bool,
 }
 
 struct Popup {
@@ -227,6 +233,7 @@ enum Surface {
     Media,
     System,
     Launcher,
+    Snip,
     MeetingAlerts,
     Popups,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
@@ -323,6 +330,8 @@ impl Bar {
             media_flare: None,
             launcher: launcher::Launcher::load(),
             launcher_surface: None,
+            snips: HashMap::new(),
+            snip_capturing: false,
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -481,6 +490,11 @@ enum Message {
     ClipboardDelete(clipboard::Entry),
     ClipboardClear,
     ClipboardPinnedOnly,
+    ToggleSnip,
+    SnipCaptured(Vec<snip::Shot>),
+    // The selection on a snip surface, and whether it goes to the editor.
+    Snip(Id, snip::Rect, bool),
+    CancelSnip,
 }
 
 fn namespace() -> String {
@@ -565,6 +579,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::PanelToggle => Message::TogglePanel,
             shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
             shortcuts::Shortcut::LauncherToggle => Message::ToggleLauncher,
+            shortcuts::Shortcut::Screenshot => Message::ToggleSnip,
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
@@ -769,6 +784,10 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             if bar.system_popover.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
                 return close_system(bar);
+            }
+            // The compositor dropped one selector surface: the snip is over on every monitor.
+            if bar.snips.remove(&id).is_some() {
+                return close_snip(bar);
             }
         }
         Message::HideTooltip => {
@@ -1227,6 +1246,29 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::SetBluetooth(adapter, powered) => {
             return Task::future(bluetooth::set_powered(adapter, powered)).discard();
         }
+        Message::ToggleSnip => {
+            if !bar.snips.is_empty() {
+                return close_snip(bar);
+            }
+            if !bar.snip_capturing {
+                return start_snip(bar);
+            }
+        }
+        Message::SnipCaptured(shots) => return open_snip(bar, shots),
+        Message::Snip(id, rect, edit) => {
+            let Some(shot) = bar.snips.get(&id) else {
+                return Task::none();
+            };
+            let frame = shot.frame.clone();
+            let area = snip::crop(rect, shot.monitor.scale, frame.dimensions());
+            let action = if edit { snip::Action::Edit } else { snip::Action::Copy { save: false } };
+            let close = close_snip(bar);
+            return match area {
+                Some(area) => Task::batch([close, Task::future(snip::deliver(frame, area, action)).discard()]),
+                None => close,
+            };
+        }
+        Message::CancelSnip => return close_snip(bar),
         Message::PowerMenu => {
             if let Err(err) = std::process::Command::new("wlogout").spawn() {
                 eprintln!("zehll: cannot start wlogout: {err}");
@@ -1651,6 +1693,74 @@ fn open_launcher(bar: &mut Bar) -> Task<Message> {
     Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_system(bar), Task::done(Message::HideTooltip), task, load_apps()])
 }
 
+/// Closes every popover, then freezes the monitors; the selector opens with the frames.
+fn start_snip(bar: &mut Bar) -> Task<Message> {
+    let popover_open = bar.panel.is_some()
+        || bar.calendar.is_some()
+        || bar.media_popover.is_some()
+        || bar.system_popover.is_some()
+        || bar.launcher_surface.is_some()
+        || bar.tray_menu.is_some()
+        || bar.tooltip.is_some();
+    let close = Task::batch([
+        close_panel(bar),
+        close_calendar(bar),
+        close_media(bar),
+        close_system(bar),
+        close_launcher(bar),
+        close_tray_menu(bar),
+        Task::done(Message::HideTooltip),
+    ]);
+    bar.snip_capturing = true;
+    // A closing popover would still be in the frame without a moment to go away.
+    let settle = if popover_open { SNIP_SETTLE } else { Duration::ZERO };
+    let capture = Task::perform(
+        async move {
+            tokio::time::sleep(settle).await;
+            snip::capture().await
+        },
+        Message::SnipCaptured,
+    );
+    Task::batch([close, capture])
+}
+
+/// One full-screen selector per frozen monitor; only the focused one takes the keyboard.
+fn open_snip(bar: &mut Bar, shots: Vec<snip::Shot>) -> Task<Message> {
+    bar.snip_capturing = false;
+    if shots.is_empty() {
+        return Task::none();
+    }
+    let tasks = shots.into_iter().map(|shot| {
+        let settings = NewLayerShellSettings {
+            size: Some((0, 0)),
+            layer: Layer::Overlay,
+            anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
+            exclusive_zone: Some(-1),
+            margin: None,
+            keyboard_interactivity: match shot.monitor.focused {
+                true => KeyboardInteractivity::Exclusive,
+                false => KeyboardInteractivity::None,
+            },
+            output_option: OutputOption::OutputName(shot.monitor.name.clone()),
+            events_transparent: false,
+            namespace: Some(String::from("zehll-snip")),
+        };
+        let id = Id::unique();
+        bar.surfaces.insert(id, Surface::Snip);
+        bar.snips.insert(id, shot);
+        Task::done(Message::NewLayerShell { settings, id })
+    });
+    Task::batch(tasks.collect::<Vec<_>>())
+}
+
+fn close_snip(bar: &mut Bar) -> Task<Message> {
+    let ids: Vec<Id> = bar.snips.drain().map(|(id, _)| id).collect();
+    Task::batch(ids.into_iter().map(|id| match bar.surfaces.contains_key(&id) {
+        true => Task::done(Message::RemoveWindow(id)),
+        false => Task::none(),
+    }))
+}
+
 /// Reads the installed apps off the UI thread; the launcher keeps the previous list meanwhile.
 fn load_apps() -> Task<Message> {
     Task::perform(async { tokio::task::spawn_blocking(apps::load).await.unwrap_or_default() }, Message::LauncherApps)
@@ -1867,6 +1977,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::System) => return sysmon::view(bar),
         Some(Surface::Tooltip(Tooltip::System)) => return sysmon::tooltip(bar),
         Some(Surface::Launcher) => return launcher::view(bar),
+        Some(Surface::Snip) => return snip::view(bar, id),
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),

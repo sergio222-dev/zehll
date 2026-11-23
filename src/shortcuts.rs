@@ -16,16 +16,18 @@ pub enum Shortcut {
     PanelToggle,
     MeetingTest,
     LauncherToggle,
+    Screenshot,
 }
 
 impl Shortcut {
-    const ALL: [Shortcut; 3] = [Shortcut::PanelToggle, Shortcut::MeetingTest, Shortcut::LauncherToggle];
+    const ALL: [Shortcut; 4] = [Shortcut::PanelToggle, Shortcut::MeetingTest, Shortcut::LauncherToggle, Shortcut::Screenshot];
 
     fn name(self) -> &'static str {
         match self {
             Shortcut::PanelToggle => "panelToggle",
             Shortcut::MeetingTest => "meetingTest",
             Shortcut::LauncherToggle => "launcherToggle",
+            Shortcut::Screenshot => "screenshot",
         }
     }
 
@@ -34,6 +36,7 @@ impl Shortcut {
             Shortcut::PanelToggle => "Toggle the side panel",
             Shortcut::MeetingTest => "Show a test meeting alert",
             Shortcut::LauncherToggle => "Toggle the app launcher",
+            Shortcut::Screenshot => "Snip a zone of the screen",
         }
     }
 }

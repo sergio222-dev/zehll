@@ -6,15 +6,21 @@ use std::process::Stdio;
 use std::sync::Arc;
 
 use chrono::NaiveDateTime;
-use iced::Point;
-use iced::widget::image::Handle;
+use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
+use iced::widget::image::{FilterMethod, Handle};
+use iced::widget::{Space, Stack, image};
+use iced::window::Id;
+use iced::{Color, ContentFit, Element, Length, Pixels, Point, Rectangle, Renderer, Size, Theme, keyboard, mouse};
 use ::image::RgbaImage;
 use tokio::io::AsyncWriteExt;
 
-use crate::hyprland;
+use crate::{Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, hyprland, theme};
 
 /// A press and release closer than this, in logical pixels, is a click.
 const CLICK_SLOP: f32 = 4.0;
+const DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.4 };
+// Text on the glow-colored window tag.
+const ON_GLOW: Color = Color::from_rgb8(0x04, 0x12, 0x1a);
 
 /// A rectangle in logical pixels relative to its monitor's top left corner.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -288,6 +294,209 @@ async fn screenshots_dir() -> PathBuf {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Pictures"));
     pictures.join("Screenshots")
+}
+
+/// The frozen frame under the selection overlay.
+pub fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
+    let Some(shot) = bar.snips.get(&id) else {
+        return Space::new().into();
+    };
+    let frame = image(shot.handle.clone())
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .content_fit(ContentFit::Fill)
+        .filter_method(FilterMethod::Linear);
+    let overlay = canvas(Overlay { id, shot, theme: bar.theme }).width(Length::Fill).height(Length::Fill);
+    Stack::new().push(frame).push(overlay).into()
+}
+
+/// Draws the dim, the targets and the selection, and turns the pointer into a selection.
+struct Overlay<'a> {
+    id: Id,
+    shot: &'a Shot,
+    theme: theme::Theme,
+}
+
+/// A press in progress: where it started, where the pointer is and which button.
+#[derive(Default)]
+struct Drag {
+    press: Option<(Point, Point, mouse::Button)>,
+}
+
+impl Overlay<'_> {
+    /// The rectangle a release at `end` selects: a dragged zone, or the target clicked.
+    fn selected(&self, start: Point, end: Point) -> Option<Rect> {
+        match is_click(start, end) {
+            true => target(&self.shot.regions, end).map(|region| region.rect),
+            false => Some(selection(start, end)),
+        }
+    }
+}
+
+impl canvas::Program<Message> for Overlay<'_> {
+    type State = Drag;
+
+    fn update(&self, drag: &mut Drag, event: &canvas::Event, _: Rectangle, cursor: mouse::Cursor) -> Option<canvas::Action<Message>> {
+        match event {
+            canvas::Event::Mouse(mouse::Event::ButtonPressed(button @ (mouse::Button::Left | mouse::Button::Right))) => {
+                let at = cursor.position()?;
+                drag.press = Some((at, at, *button));
+                Some(canvas::Action::request_redraw().and_capture())
+            }
+            canvas::Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if let (Some((_, end, _)), Some(at)) = (&mut drag.press, cursor.position()) {
+                    *end = at;
+                }
+                Some(canvas::Action::request_redraw())
+            }
+            canvas::Event::Mouse(mouse::Event::ButtonReleased(released)) => {
+                let (start, end, button) = drag.press.take()?;
+                if *released != button {
+                    drag.press = Some((start, end, button));
+                    return None;
+                }
+                let end = cursor.position().unwrap_or(end);
+                let edit = button == mouse::Button::Right;
+                Some(match self.selected(start, end) {
+                    Some(rect) => canvas::Action::publish(Message::Snip(self.id, rect, edit)).and_capture(),
+                    None => canvas::Action::request_redraw(),
+                })
+            }
+            canvas::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
+                Some(canvas::Action::publish(Message::CancelSnip).and_capture())
+            }
+            _ => None,
+        }
+    }
+
+    fn draw(&self, drag: &Drag, renderer: &Renderer, _: &Theme, bounds: Rectangle, cursor: mouse::Cursor) -> Vec<Geometry> {
+        let theme = self.theme;
+        let mut frame = Frame::new(renderer, bounds.size());
+        let (width, height) = (bounds.width, bounds.height);
+        let dragged = drag.press.filter(|(start, end, _)| !is_click(*start, *end));
+        match dragged {
+            Some((start, end, _)) => {
+                let zone = selection(start, end);
+                // Dim everything but the zone.
+                let (right, bottom) = (zone.x + zone.width, zone.y + zone.height);
+                frame.fill_rectangle(Point::ORIGIN, Size::new(width, zone.y), DIM);
+                frame.fill_rectangle(Point::new(0.0, bottom), Size::new(width, height - bottom), DIM);
+                frame.fill_rectangle(Point::new(0.0, zone.y), Size::new(zone.x, zone.height), DIM);
+                frame.fill_rectangle(Point::new(right, zone.y), Size::new(width - right, zone.height), DIM);
+                frame.stroke(&rectangle(zone, 0.5), Stroke::default().with_color(Color { a: 0.7, ..theme.text }).with_width(1.0));
+                brackets(&mut frame, zone, theme.accent);
+                let label = size_label(zone, self.shot.monitor.scale);
+                let below = (bottom + 8.0).min(height - 26.0);
+                tag(&mut frame, Point::new(zone.x, below), &label, theme.accent, theme.on_accent);
+            }
+            None => {
+                frame.fill_rectangle(Point::ORIGIN, bounds.size(), DIM);
+                let outline = Stroke::default().with_color(Color { a: 0.55, ..theme.glow }).with_width(1.0);
+                for region in &self.shot.regions {
+                    frame.stroke(&rectangle(region.rect, 0.5), outline);
+                }
+                let hovered = cursor.position().and_then(|at| target(&self.shot.regions, at));
+                if let Some(region) = hovered {
+                    frame.fill_rectangle(Point::new(region.rect.x, region.rect.y), Size::new(region.rect.width, region.rect.height), Color { a: 0.14, ..theme.glow });
+                    frame.stroke(&rectangle(region.rect, 1.0), Stroke::default().with_color(theme.glow).with_width(2.0));
+                    tag(&mut frame, Point::new(region.rect.x + 6.0, region.rect.y + 6.0), &region.label.to_uppercase(), theme.glow, ON_GLOW);
+                }
+            }
+        }
+        if let Some(at) = cursor.position() {
+            let edit = drag.press.is_some_and(|(_, _, button)| button == mouse::Button::Right);
+            guide(&mut frame, at, edit, theme);
+        }
+        vec![frame.into_geometry()]
+    }
+
+    fn mouse_interaction(&self, _: &Drag, bounds: Rectangle, cursor: mouse::Cursor) -> mouse::Interaction {
+        match cursor.is_over(bounds) {
+            true => mouse::Interaction::Crosshair,
+            false => mouse::Interaction::default(),
+        }
+    }
+}
+
+/// `rect` shrunk by `inset` on every side, so a stroke `2 * inset` wide stays inside it.
+fn rectangle(rect: Rect, inset: f32) -> Path {
+    Path::rectangle(Point::new(rect.x + inset, rect.y + inset), Size::new((rect.width - 2.0 * inset).max(0.0), (rect.height - 2.0 * inset).max(0.0)))
+}
+
+/// Accent L marks just outside each corner of the selection.
+fn brackets(frame: &mut Frame, zone: Rect, color: Color) {
+    const ARM: f32 = 16.0;
+    const OUT: f32 = 5.0;
+    let (left, top) = (zone.x - OUT, zone.y - OUT);
+    let (right, bottom) = (zone.x + zone.width + OUT, zone.y + zone.height + OUT);
+    let corners = [(left, top, 1.0, 1.0), (right, top, -1.0, 1.0), (left, bottom, 1.0, -1.0), (right, bottom, -1.0, -1.0)];
+    let stroke = Stroke::default().with_color(color).with_width(2.0);
+    for (x, y, dx, dy) in corners {
+        let mark = Path::new(|builder| {
+            builder.move_to(Point::new(x + dx * ARM, y));
+            builder.line_to(Point::new(x, y));
+            builder.line_to(Point::new(x, y + dy * ARM));
+        });
+        frame.stroke(&mark, stroke);
+    }
+}
+
+/// A slanted label like the bar's window tag, with its top left at `at`.
+fn tag(frame: &mut Frame, at: Point, label: &str, background: Color, color: Color) {
+    const HEIGHT: f32 = 22.0;
+    const SIZE: f32 = 14.0;
+    // Barlow Condensed averages about half an em per character.
+    let width = label.chars().count() as f32 * SIZE * 0.52 + 22.0;
+    let shape = Path::new(|builder| {
+        builder.move_to(at);
+        builder.line_to(Point::new(at.x + width, at.y));
+        builder.line_to(Point::new(at.x + width - 7.0, at.y + HEIGHT));
+        builder.line_to(Point::new(at.x, at.y + HEIGHT));
+        builder.close();
+    });
+    frame.fill(&shape, background);
+    frame.fill_text(canvas::Text {
+        content: label.to_owned(),
+        position: Point::new(at.x + 8.0, at.y + HEIGHT / 2.0),
+        color,
+        size: Pixels(SIZE),
+        font: CONDENSED_HEAVY,
+        align_y: iced::alignment::Vertical::Center,
+        ..Default::default()
+    });
+}
+
+/// The chip beside the pointer saying what a release does.
+fn guide(frame: &mut Frame, at: Point, edit: bool, theme: theme::Theme) {
+    let (glyph, label) = if edit { ("edit", "EDIT") } else { ("content_copy", "COPY") };
+    let origin = Point::new(at.x + 18.0, at.y + 18.0);
+    let size = Size::new(66.0, 24.0);
+    frame.fill_rectangle(origin, size, theme.popup_background);
+    frame.stroke(&Path::rectangle(Point::new(origin.x + 0.5, origin.y + 0.5), Size::new(size.width - 1.0, size.height - 1.0)), Stroke::default().with_color(theme.border).with_width(1.0));
+    let middle = origin.y + size.height / 2.0;
+    frame.fill_text(canvas::Text {
+        content: glyph.to_owned(),
+        position: Point::new(origin.x + 7.0, middle),
+        color: theme.accent,
+        size: Pixels(14.0),
+        font: ICON_FONT,
+        align_y: iced::alignment::Vertical::Center,
+        shaping: iced::widget::text::Shaping::Advanced,
+        ..Default::default()
+    });
+    frame.fill_text(canvas::Text {
+        content: label.to_owned(),
+        position: Point::new(origin.x + 26.0, middle),
+        color: theme.text,
+        size: Pixels(13.0),
+        font: CONDENSED_BOLD,
+        align_y: iced::alignment::Vertical::Center,
+        ..Default::default()
+    });
+}
+
+fn canvas<'a>(overlay: Overlay<'a>) -> canvas::Canvas<Overlay<'a>, Message> {
+    iced::widget::canvas(overlay)
 }
 
 #[cfg(test)]
