@@ -13,6 +13,8 @@ pub struct State {
     pub night_automatic: bool,
     /// The anti-flashbang screen shader is on.
     pub content_adjustment: bool,
+    /// The snip toolbar's SAVE toggle: snips are saved besides being copied.
+    pub snip_save: bool,
 }
 
 impl Default for State {
@@ -23,6 +25,7 @@ impl Default for State {
             night_temperature: nightlight::NIGHT,
             night_automatic: true,
             content_adjustment: false,
+            snip_save: false,
         }
     }
 }
@@ -41,6 +44,7 @@ impl State {
             night_temperature: state["night_temperature"].as_u64().map_or(default.night_temperature, |kelvin| kelvin as u32),
             night_automatic: flag("night_automatic", default.night_automatic),
             content_adjustment: flag("content_adjustment", default.content_adjustment),
+            snip_save: flag("snip_save", default.snip_save),
         }
     }
 
@@ -52,6 +56,7 @@ impl State {
             "night_temperature": self.night_temperature,
             "night_automatic": self.night_automatic,
             "content_adjustment": self.content_adjustment,
+            "snip_save": self.snip_save,
         })
         .to_string();
         let result = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, content));

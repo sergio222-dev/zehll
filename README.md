@@ -13,6 +13,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - Google Calendar meetings: the next meeting beside the clock, a calendar popover with each day's agenda, and alerts when a meeting is about to start.
 - Media player (MPRIS): a play/pause button left of the date opens a player popover, with cover art, seek bar, previous/next, shuffle and repeat.
 - App launcher: fuzzy search over apps, session commands, files, clipboard history, Hyprland keybindings and a calculator.
+- Screen snip in the style of ii's region selector: freeze the screen, pick a window or drag a zone, copy, save or edit it.
 - One bar per monitor.
 - Material 3 theme loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -26,6 +27,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - Optional, for the audio spectrum behind the player popover: [cava](https://github.com/karlstav/cava)
 - Optional, for meetings: `python3`, a Google OAuth client in `~/.config/calendarz/credentials.json`, `pw-play` (PipeWire) for the alert sound and `xdg-open`
 - Optional, for the launcher pages: `qalc` (libqalculate) for the calculator, `fd`, `zoxide`, `file` and `xdg-open` for files, `cliphist` and `wl-copy` for the clipboard
+- Optional, for the screen snip: `grim` and `wl-copy`, plus [swappy](https://github.com/jtheoof/swappy) to edit and `xdg-user-dir` to find the Pictures folder
 
 ## Build and run
 
@@ -114,6 +116,24 @@ Type to search; the list is fuzzy matched. Up/Down, Tab/Shift+Tab, Ctrl+J/K and 
 - **Calculator** evaluates the search with qalc as you type: math, units and currencies. Enter copies the result and keeps it in a history of 25 (`~/.local/state/zehll/calculator.json`); Ctrl+Enter puts `(result)` back in the search; Tab walks the history and Enter on a past calculation reuses it.
 
 The launcher uses the layer namespaces `zehll-launcher` and `zehll-launcher-catcher`. Setting `ZEHLL_CLIPHIST_DB` to a file makes the clipboard page use that cliphist database instead of the default one, which is useful to try deleting and wiping without touching your history.
+
+## Screen snip
+
+Zehll registers the Hyprland global shortcut `zehll:screenshot`, which freezes every monitor with `grim` and opens a zone selector over them, like ii's region selector:
+
+```
+bind = SUPER SHIFT, S, global, zehll:screenshot
+```
+
+or, with a Lua config:
+
+```lua
+hl.bind("SUPER + SHIFT + S", hl.dsp.global("zehll:screenshot"))
+```
+
+The screen dims and every window of the active workspace, and every top-level layer that is not a bar, gets an outline; the one under the pointer lights up with its class, and a click selects it. Dragging selects any zone instead, with its size in pixels. Releasing the left button copies the selection as a PNG with `wl-copy`; the right button opens it in swappy. Escape, the close button or the shortcut again cancel. A selection stays on one monitor.
+
+SAVE in the toolbar also writes each copied snip to `$(xdg-user-dir PICTURES)/Screenshots/screenshot-YYYY-MM-DD_HH.MM.SS.png`; it is remembered in `~/.local/state/zehll/state.json`. The selector uses the layer namespace `zehll-snip`; a `noanim` layer rule keeps it from fading in over the frozen frame.
 
 ## Theme
 
