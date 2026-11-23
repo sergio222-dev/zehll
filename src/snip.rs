@@ -1,8 +1,17 @@
 //! Screen snip with a zone selector, like ii's region selector: every monitor is frozen,
 //! windows and layers can be picked with a click, and a dragged rectangle selects any zone.
 
+use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::Arc;
+
 use chrono::NaiveDateTime;
 use iced::Point;
+use iced::widget::image::Handle;
+use ::image::RgbaImage;
+use tokio::io::AsyncWriteExt;
+
+use crate::hyprland;
 
 /// A press and release closer than this, in logical pixels, is a click.
 const CLICK_SLOP: f32 = 4.0;
@@ -154,6 +163,131 @@ pub fn size_label(rect: Rect, scale: f32) -> String {
 /// ii's file name: `screenshot-2026-11-23_14.05.09.png`.
 pub fn file_name(now: NaiveDateTime) -> String {
     now.format("screenshot-%Y-%m-%d_%H.%M.%S.png").to_string()
+}
+
+/// One monitor frozen for the selector: its frame and what a click can pick on it.
+#[derive(Clone)]
+pub struct Shot {
+    pub monitor: Monitor,
+    pub frame: Arc<RgbaImage>,
+    pub handle: Handle,
+    pub regions: Vec<Region>,
+}
+
+impl std::fmt::Debug for Shot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Shot").field("monitor", &self.monitor).field("regions", &self.regions.len()).finish()
+    }
+}
+
+/// Freezes every monitor: one `grim` per output, all at once, before any surface opens.
+pub async fn capture() -> Vec<Shot> {
+    let Ok(Some((monitors, clients, layers))) = tokio::task::spawn_blocking(hyprland::layout).await else {
+        eprintln!("zehll: cannot read the Hyprland layout for the snip");
+        return Vec::new();
+    };
+    let grabs = parse_monitors(&monitors).into_iter().map(|monitor| {
+        let regions = regions(&monitor, &clients, &layers);
+        async move {
+            let frame = grab(&monitor.name).await?;
+            let handle = Handle::from_rgba(frame.width(), frame.height(), frame.as_raw().clone());
+            Some(Shot { monitor, frame: Arc::new(frame), handle, regions })
+        }
+    });
+    iced::futures::future::join_all(grabs).await.into_iter().flatten().collect()
+}
+
+/// The output's current frame; PPM skips compressing a picture that is decoded right away.
+async fn grab(output: &str) -> Option<RgbaImage> {
+    let shot = tokio::process::Command::new("grim").args(["-o", output, "-t", "ppm", "-"]).output().await;
+    let bytes = match shot {
+        Ok(shot) if shot.status.success() => shot.stdout,
+        Ok(shot) => {
+            eprintln!("zehll: grim failed on {output}: {}", String::from_utf8_lossy(&shot.stderr).trim());
+            return None;
+        }
+        Err(err) => {
+            eprintln!("zehll: cannot run grim: {err}");
+            return None;
+        }
+    };
+    let decode = move || ::image::load_from_memory_with_format(&bytes, ::image::ImageFormat::Pnm).map(|frame| frame.to_rgba8());
+    match tokio::task::spawn_blocking(decode).await {
+        Ok(Ok(frame)) => Some(frame),
+        Ok(Err(err)) => {
+            eprintln!("zehll: cannot decode the frame of {output}: {err}");
+            None
+        }
+        Err(_) => None,
+    }
+}
+
+/// What happens to the selection: copy it (and save it), or open it in swappy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Copy { save: bool },
+    Edit,
+}
+
+/// Crops `frame` to `area` (physical pixels) and copies, saves or edits it.
+pub async fn deliver(frame: Arc<RgbaImage>, area: (u32, u32, u32, u32), action: Action) {
+    let encode = move || {
+        let (x, y, width, height) = area;
+        let crop = ::image::imageops::crop_imm(frame.as_ref(), x, y, width, height).to_image();
+        let mut png = Vec::new();
+        crop.write_to(&mut std::io::Cursor::new(&mut png), ::image::ImageFormat::Png).map(|()| png)
+    };
+    let png = match tokio::task::spawn_blocking(encode).await {
+        Ok(Ok(png)) => png,
+        Ok(Err(err)) => return eprintln!("zehll: cannot encode the snip: {err}"),
+        Err(_) => return,
+    };
+    match action {
+        Action::Edit => {
+            // swappy keeps running on its own; the runtime reaps it when it exits.
+            pipe("swappy", &["-f", "-"], &png, false).await;
+        }
+        Action::Copy { save } => {
+            if save {
+                let dir = screenshots_dir().await;
+                let path = dir.join(file_name(chrono::Local::now().naive_local()));
+                let written = tokio::fs::create_dir_all(&dir).await.and(tokio::fs::write(&path, &png).await);
+                if let Err(err) = written {
+                    eprintln!("zehll: cannot save {}: {err}", path.display());
+                }
+            }
+            pipe("wl-copy", &["--type", "image/png"], &png, true).await;
+        }
+    }
+}
+
+/// Starts `program` with `input` on its stdin, waiting for it when `wait`.
+async fn pipe(program: &str, args: &[&str], input: &[u8], wait: bool) {
+    let child = tokio::process::Command::new(program).args(args).stdin(Stdio::piped()).spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(err) => return eprintln!("zehll: cannot run {program}: {err}"),
+    };
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(err) = stdin.write_all(input).await
+    {
+        eprintln!("zehll: cannot write to {program}: {err}");
+    }
+    if wait {
+        let _ = child.wait().await;
+    }
+}
+
+/// `$(xdg-user-dir PICTURES)/Screenshots`, like ii and the Print binds.
+async fn screenshots_dir() -> PathBuf {
+    let pictures = tokio::process::Command::new("xdg-user-dir").arg("PICTURES").output().await.ok();
+    let pictures = pictures
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("Pictures"));
+    pictures.join("Screenshots")
 }
 
 #[cfg(test)]

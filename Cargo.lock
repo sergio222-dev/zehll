@@ -5387,6 +5387,7 @@ dependencies = [
  "freedesktop-icons",
  "iced",
  "iced_layershell",
+ "image",
  "serde_json",
  "system-tray",
  "tokio",

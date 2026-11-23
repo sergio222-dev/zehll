@@ -68,6 +68,11 @@ pub fn clients() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Monitors, windows and layers (`j/monitors`, `j/clients`, `j/layers`), read together.
+pub fn layout() -> Option<(serde_json::Value, serde_json::Value, serde_json::Value)> {
+    Some((request("j/monitors")?, request("j/clients")?, request("j/layers")?))
+}
+
 /// A Lua string literal holding `text`.
 fn lua_string(text: &str) -> String {
     let mut literal = String::from("\"");
