@@ -531,6 +531,11 @@ enum Message {
     GalleryScroll(i32),
     GalleryAccent(usize),
     OpenWallpaperFolder,
+    // Opens the launcher on a page, or closes it when it is open there.
+    ToggleLauncherPage(launcher::Page),
+    // Applies a random wallpaper, once the folder is listed.
+    RandomWallpaper,
+    RandomWallpaperFrom(Vec<gallery::Entry>),
     // The wallpaper scaled, whether to recolor the desktop, and its sizes (`None` if unreadable).
     WallpaperPrepared(std::path::PathBuf, bool, Option<Vec<wallpaper::Scaled>>),
     // A frame of a wallpaper sliding to its new place.
@@ -624,6 +629,8 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::MeetingTest => Message::MeetingTest,
             shortcuts::Shortcut::LauncherToggle | shortcuts::Shortcut::LauncherTap => Message::ToggleLauncher,
             shortcuts::Shortcut::Screenshot => Message::ToggleSnip,
+            shortcuts::Shortcut::Wallpapers => Message::ToggleLauncherPage(launcher::Page::Wallpapers),
+            shortcuts::Shortcut::WallpaperRandom => Message::RandomWallpaper,
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
@@ -1008,7 +1015,25 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             bar.workspaces.values_mut().for_each(|indicator| indicator.settle(now));
         }
         Message::ToggleLauncher => {
-            return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar) };
+            return if bar.launcher_surface.is_some() { close_launcher(bar) } else { open_launcher(bar, launcher::Page::Home) };
+        }
+        Message::ToggleLauncherPage(page) => {
+            if bar.launcher_surface.is_none() {
+                return open_launcher(bar, page);
+            }
+            if bar.launcher.page() == page {
+                return close_launcher(bar);
+            }
+            bar.launcher.reset();
+            return Task::batch([enter_page(bar, page), resize_launcher(bar)]);
+        }
+        Message::RandomWallpaper => return Task::perform(gallery::list(), Message::RandomWallpaperFrom),
+        Message::RandomWallpaperFrom(entries) => {
+            let current = bar.wallpaper.path.clone();
+            let pick = gallery::pick_other(entries.len(), |at| Some(&entries[at].path) == current.as_ref(), gallery::seed());
+            if let Some(at) = pick {
+                return Task::done(Message::ApplyWallpaper(entries[at].path.clone(), 0));
+            }
         }
         Message::LauncherQuery(query) => return set_launcher_query(bar, query),
         Message::CalcAnswer(query, answer) => bar.launcher.set_answer(query, answer),
@@ -1819,15 +1844,20 @@ fn close_system(bar: &mut Bar) -> Task<Message> {
 }
 
 /// Opens the launcher centered on the focused monitor, on Home, closing every popover.
-fn open_launcher(bar: &mut Bar) -> Task<Message> {
+fn open_launcher(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
     let Some(output) = hyprland::focused_monitor() else {
         return Task::none();
     };
     bar.launcher.reset();
     bar.launcher.now = Local::now().timestamp();
     bar.launcher.running = hyprland::clients().into_iter().map(|(_, class)| class).collect();
+    // A page opened by a shortcut sizes the surface from the start.
+    let page_task = match page {
+        launcher::Page::Home => Task::none(),
+        page => enter_page(bar, page),
+    };
     let surface = NewLayerShellSettings {
-        size: Some((launcher::WIDTH, launcher::HEIGHT)),
+        size: Some(launcher::size(page)),
         layer: Layer::Overlay,
         // No anchor centers it on the output.
         anchor: Anchor::empty(),
@@ -1845,7 +1875,8 @@ fn open_launcher(bar: &mut Bar) -> Task<Message> {
         settings: catcher_settings(output, "zehll-launcher-catcher"),
         id: open.catcher,
     })
-    .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }));
+    .chain(Task::done(Message::NewLayerShell { settings: surface, id: open.panel }))
+    .chain(page_task);
     bar.launcher_surface = Some(open);
     Task::batch([close_panel(bar), close_calendar(bar), close_media(bar), close_system(bar), Task::done(Message::HideTooltip), task, load_apps()])
 }
@@ -1933,6 +1964,23 @@ fn close_launcher(bar: &mut Bar) -> Task<Message> {
     }))
 }
 
+/// Enters `page` from Home and loads what it shows. The caller fits the surface to it.
+fn enter_page(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
+    if page == launcher::Page::Keybinds {
+        bar.launcher.keybinds = keybinds::load();
+    }
+    bar.launcher.open(page);
+    match page {
+        launcher::Page::Files => Task::batch([Task::perform(files::recent(), Message::FilesRecent), focus_launcher()]),
+        launcher::Page::Clipboard => {
+            let request = bar.launcher.begin_clips();
+            Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
+        }
+        launcher::Page::Wallpapers => Task::batch([Task::perform(gallery::list(), Message::GalleryList), focus_launcher()]),
+        _ => focus_launcher(),
+    }
+}
+
 /// Fits the launcher's surface to its page: the Wallpapers grid is larger.
 fn resize_launcher(bar: &Bar) -> Task<Message> {
     match &bar.launcher_surface {
@@ -1965,8 +2013,10 @@ fn gallery_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
             if others.is_empty() {
                 return Task::none();
             }
-            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.subsec_nanos() as usize);
-            bar.launcher.gallery_select(others[nanos % others.len()]);
+            let Some(at) = gallery::pick_other(others.len(), |_| false, gallery::seed()) else {
+                return Task::none();
+            };
+            bar.launcher.gallery_select(others[at]);
             return gallery_nav(bar, launcher::Nav::Activate { secondary: false });
         }
         launcher::Nav::Activate { .. } => {
@@ -2007,21 +2057,7 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
             Some(entry) => Task::batch([set_launcher_query(bar, entry.input.clone()), focus_launcher()]),
             None => focus_launcher(),
         },
-        launcher::Action::Open(page) => {
-            if page == launcher::Page::Keybinds {
-                bar.launcher.keybinds = keybinds::load();
-            }
-            bar.launcher.open(page);
-            match page {
-                launcher::Page::Files => Task::batch([Task::perform(files::recent(), Message::FilesRecent), focus_launcher()]),
-                launcher::Page::Clipboard => {
-                    let request = bar.launcher.begin_clips();
-                    Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
-                }
-                launcher::Page::Wallpapers => Task::batch([resize_launcher(bar), Task::perform(gallery::list(), Message::GalleryList), focus_launcher()]),
-                _ => focus_launcher(),
-            }
-        }
+        launcher::Action::Open(page) => Task::batch([enter_page(bar, page), resize_launcher(bar)]),
         launcher::Action::App(index) => {
             let Some(app) = bar.launcher.apps.get(index).cloned() else {
                 return focus_launcher();

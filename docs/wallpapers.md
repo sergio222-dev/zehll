@@ -14,7 +14,16 @@ The wallpaper and its accent are kept in `~/.local/state/zehll/wallpapers.json`,
 
 ## The Wallpapers page
 
-Open the launcher and pick **Wallpapers** in Home. The launcher grows to a grid of the images in `$(xdg-user-dir PICTURES)/Wallpapers`, newest first; the search filters them by name. Thumbnails are made in the background and kept in `~/.cache/zehll/thumbs`.
+Open the launcher and pick **Wallpapers** in Home, or use the global shortcut `zehll:wallpapers`, which opens the launcher on this page (and closes it when it is there). `zehll:wallpaperRandom` applies a random wallpaper from the folder without opening anything. ii binds the same actions to Ctrl+Super+T and Ctrl+Super+Alt+T; with a Lua config:
+
+```lua
+hl.unbind("CTRL + SUPER + T")
+hl.unbind("CTRL + SUPER + ALT + T")
+hl.bind("CTRL + SUPER + T", hl.dsp.global("zehll:wallpapers"), { description = "Shell: Change wallpaper" })
+hl.bind("CTRL + SUPER + ALT + T", hl.dsp.global("zehll:wallpaperRandom"), { description = "Shell: Random wallpaper" })
+```
+
+ The launcher grows to a grid of the images in `$(xdg-user-dir PICTURES)/Wallpapers`, newest first; the search filters them by name. Thumbnails are made in the background and kept in `~/.cache/zehll/thumbs`.
 
 | Key | Action |
 |---|---|

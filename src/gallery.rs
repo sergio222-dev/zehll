@@ -84,6 +84,20 @@ pub fn cycle(previous: usize, delta: i32, count: usize) -> usize {
     }
 }
 
+/// A random one of `count` items other than the current one, from `seed`.
+pub fn pick_other(count: usize, is_current: impl Fn(usize) -> bool, seed: usize) -> Option<usize> {
+    let others: Vec<usize> = (0..count).filter(|&at| !is_current(at)).collect();
+    match others.len() {
+        0 => None,
+        len => Some(others[seed % len]),
+    }
+}
+
+/// A seed from the clock, for `pick_other`.
+pub fn seed() -> usize {
+    std::time::SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |time| time.subsec_nanos() as usize)
+}
+
 /// `$(xdg-user-dir PICTURES)/Wallpapers`, like ii.
 pub fn folder() -> PathBuf {
     let pictures = std::process::Command::new("xdg-user-dir")
@@ -230,6 +244,16 @@ mod tests {
         assert_eq!(first_row(20, 1, 3, 4), 3);
         assert_eq!(first_row(2, 3, 3, 4), 0);
         assert_eq!(first_row(9, 1, 3, 4), 1);
+    }
+
+    #[test]
+    fn a_random_pick_skips_the_current_one() {
+        assert_eq!(pick_other(3, |at| at == 0, 0), Some(1));
+        assert_eq!(pick_other(3, |at| at == 0, 1), Some(2));
+        assert_eq!(pick_other(3, |at| at == 0, 2), Some(1));
+        assert_eq!(pick_other(3, |_| false, 5), Some(2));
+        assert_eq!(pick_other(1, |at| at == 0, 7), None);
+        assert_eq!(pick_other(0, |_| false, 7), None);
     }
 
     #[test]

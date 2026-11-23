@@ -20,11 +20,22 @@ pub enum Shortcut {
     /// other key and sends it from a release bind, which reaches Zehll as `released`.
     LauncherTap,
     Screenshot,
+    /// The launcher on its Wallpapers page.
+    Wallpapers,
+    /// A random wallpaper from the wallpaper folder.
+    WallpaperRandom,
 }
 
 impl Shortcut {
-    const ALL: [Shortcut; 5] =
-        [Shortcut::PanelToggle, Shortcut::MeetingTest, Shortcut::LauncherToggle, Shortcut::LauncherTap, Shortcut::Screenshot];
+    const ALL: [Shortcut; 7] = [
+        Shortcut::PanelToggle,
+        Shortcut::MeetingTest,
+        Shortcut::LauncherToggle,
+        Shortcut::LauncherTap,
+        Shortcut::Screenshot,
+        Shortcut::Wallpapers,
+        Shortcut::WallpaperRandom,
+    ];
 
     fn name(self) -> &'static str {
         match self {
@@ -33,6 +44,8 @@ impl Shortcut {
             Shortcut::LauncherToggle => "launcherToggle",
             Shortcut::LauncherTap => "launcherTap",
             Shortcut::Screenshot => "screenshot",
+            Shortcut::Wallpapers => "wallpapers",
+            Shortcut::WallpaperRandom => "wallpaperRandom",
         }
     }
 
@@ -43,6 +56,8 @@ impl Shortcut {
             Shortcut::LauncherToggle => "Toggle the app launcher",
             Shortcut::LauncherTap => "Toggle the app launcher when released (SUPER tap)",
             Shortcut::Screenshot => "Snip a zone of the screen",
+            Shortcut::Wallpapers => "Toggle the launcher on its Wallpapers page",
+            Shortcut::WallpaperRandom => "Apply a random wallpaper",
         }
     }
 
