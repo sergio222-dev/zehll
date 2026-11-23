@@ -13,6 +13,7 @@ mod files;
 mod flame;
 mod flashbang;
 mod fuzzy;
+mod gallery;
 mod hyprland;
 mod idle;
 mod keybinds;
@@ -519,7 +520,17 @@ enum Message {
     Snip(Id, snip::Rect, bool),
     CancelSnip,
     ToggleSnipSave,
-    ApplyWallpaper(std::path::PathBuf),
+    // A wallpaper and the index of its accent among matugen's source colors.
+    ApplyWallpaper(std::path::PathBuf, usize),
+    GalleryList(Vec<gallery::Entry>),
+    // An image and its thumbnail, `None` when it cannot be made.
+    GalleryThumb(std::path::PathBuf, Option<std::path::PathBuf>),
+    GalleryColors(std::path::PathBuf, Vec<String>),
+    // A tile, by its position among the tiles shown: selects it, or applies it when selected.
+    GalleryClick(usize),
+    GalleryScroll(i32),
+    GalleryAccent(usize),
+    OpenWallpaperFolder,
     // The wallpaper scaled, whether to recolor the desktop, and its sizes (`None` if unreadable).
     WallpaperPrepared(std::path::PathBuf, bool, Option<Vec<wallpaper::Scaled>>),
     // A frame of a wallpaper sliding to its new place.
@@ -1001,6 +1012,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::LauncherQuery(query) => return set_launcher_query(bar, query),
         Message::CalcAnswer(query, answer) => bar.launcher.set_answer(query, answer),
+        Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Wallpapers => return gallery_nav(bar, nav),
         Message::LauncherNav(nav) => {
             let len = launcher::items(&bar.launcher).len();
             match nav {
@@ -1009,6 +1021,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                     if !bar.launcher.back() {
                         return close_launcher(bar);
                     }
+                    // Escape takes the focus from the search field.
+                    return Task::batch([resize_launcher(bar), focus_launcher()]);
                 }
                 launcher::Nav::Move(delta) => {
                     bar.launcher.move_selection(delta, len);
@@ -1020,11 +1034,42 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 launcher::Nav::Activate { secondary } => return activate_launcher_item(bar, bar.launcher.selected, secondary),
                 // Ctrl+1..9 counts the rows on screen.
                 launcher::Nav::Pick(row) => return activate_launcher_item(bar, bar.launcher.first + row, false),
+                // Only grids use these.
+                launcher::Nav::Sideways(_) | launcher::Nav::Accent(_) | launcher::Nav::Random => return Task::none(),
             }
-            // Escape takes the focus from the search field.
-            return focus_launcher();
         }
         Message::LauncherActivate(index) => return activate_launcher_item(bar, index, false),
+        Message::GalleryList(entries) => {
+            let missing: Vec<gallery::Entry> = entries.iter().filter(|entry| !bar.launcher.gallery.thumbs.contains_key(&entry.path)).cloned().collect();
+            bar.launcher.gallery.entries = entries;
+            // The current wallpaper starts selected, if it is listed.
+            let current = bar.wallpaper.path.as_ref().and_then(|path| bar.launcher.gallery_shown().iter().position(|&index| bar.launcher.gallery.entries[index].path == *path));
+            bar.launcher.gallery_select(current.unwrap_or(0));
+            let thumbs = Task::run(gallery::thumbnails(missing), |(path, thumb)| Message::GalleryThumb(path, thumb));
+            return Task::batch([thumbs, gallery_colors(bar)]);
+        }
+        Message::GalleryThumb(path, Some(thumb)) => {
+            bar.launcher.gallery.thumbs.insert(path, thumb);
+        }
+        Message::GalleryThumb(path, None) => eprintln!("zehll: cannot make a thumbnail of {}", path.display()),
+        Message::GalleryColors(path, colors) => {
+            bar.launcher.gallery.colors.insert(path, colors);
+        }
+        Message::GalleryClick(at) if at == bar.launcher.selected => return gallery_nav(bar, launcher::Nav::Activate { secondary: false }),
+        Message::GalleryClick(at) => {
+            bar.launcher.gallery_select(at);
+            return gallery_colors(bar);
+        }
+        Message::GalleryScroll(rows) => bar.launcher.gallery_scroll(rows),
+        Message::GalleryAccent(index) => bar.launcher.gallery.accent = index,
+        Message::OpenWallpaperFolder => {
+            let folder = gallery::folder();
+            let _ = std::fs::create_dir_all(&folder);
+            if !hyprland::exec(&format!("xdg-open {}", files::shell_quote(&folder.to_string_lossy()))) {
+                eprintln!("zehll: cannot open {}", folder.display());
+            }
+            return close_launcher(bar);
+        }
         Message::LauncherApps(apps) => bar.launcher.apps = apps,
         Message::LauncherScroll(rows, len) => bar.launcher.scroll(rows, len),
         Message::FilesRecent(recent) => {
@@ -1310,8 +1355,9 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             bar.snip_save = !bar.snip_save;
             bar.save_state();
         }
-        Message::ApplyWallpaper(path) => {
+        Message::ApplyWallpaper(path, accent) => {
             bar.wallpaper.path = Some(path.clone());
+            bar.wallpaper.accent = accent;
             wallpaper::save(&bar.wallpaper);
             return prepare_wallpaper(bar, path, true);
         }
@@ -1887,6 +1933,65 @@ fn close_launcher(bar: &mut Bar) -> Task<Message> {
     }))
 }
 
+/// Fits the launcher's surface to its page: the Wallpapers grid is larger.
+fn resize_launcher(bar: &Bar) -> Task<Message> {
+    match &bar.launcher_surface {
+        Some(open) => Task::done(Message::SizeChange { id: open.panel, size: launcher::size(bar.launcher.page()) }),
+        None => Task::none(),
+    }
+}
+
+/// Keys on the Wallpapers page: arrows move among the tiles, Alt+arrows pick the accent,
+/// Enter applies the selected wallpaper and Ctrl+R a random one.
+fn gallery_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
+    match nav {
+        launcher::Nav::Close => return close_launcher(bar),
+        launcher::Nav::Back => {
+            if !bar.launcher.back() {
+                return close_launcher(bar);
+            }
+            return Task::batch([resize_launcher(bar), focus_launcher()]);
+        }
+        launcher::Nav::Move(rows) => bar.launcher.gallery_move(rows * gallery::COLUMNS as i32),
+        launcher::Nav::Sideways(delta) => bar.launcher.gallery_move(delta),
+        launcher::Nav::Accent(delta) => {
+            let count = bar.launcher.gallery_selected().and_then(|entry| bar.launcher.gallery.colors.get(&entry.path)).map_or(0, Vec::len);
+            bar.launcher.gallery.accent = gallery::cycle(bar.launcher.gallery.accent, delta, count);
+            return Task::none();
+        }
+        launcher::Nav::Random => {
+            let shown = bar.launcher.gallery_shown();
+            let others: Vec<usize> = (0..shown.len()).filter(|&at| Some(&bar.launcher.gallery.entries[shown[at]].path) != bar.wallpaper.path.as_ref()).collect();
+            if others.is_empty() {
+                return Task::none();
+            }
+            let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.subsec_nanos() as usize);
+            bar.launcher.gallery_select(others[nanos % others.len()]);
+            return gallery_nav(bar, launcher::Nav::Activate { secondary: false });
+        }
+        launcher::Nav::Activate { .. } => {
+            let Some(entry) = bar.launcher.gallery_selected() else {
+                return Task::none();
+            };
+            return Task::done(Message::ApplyWallpaper(entry.path.clone(), bar.launcher.gallery.accent));
+        }
+        launcher::Nav::Pick(_) => return Task::none(),
+    }
+    gallery_colors(bar)
+}
+
+/// Asks matugen for the selected wallpaper's colors, unless they are known.
+fn gallery_colors(bar: &Bar) -> Task<Message> {
+    let Some(entry) = bar.launcher.gallery_selected() else {
+        return Task::none();
+    };
+    if bar.launcher.gallery.colors.contains_key(&entry.path) {
+        return Task::none();
+    }
+    let path = entry.path.clone();
+    Task::perform(gallery::source_colors(path.clone()), move |colors| Message::GalleryColors(path.clone(), colors))
+}
+
 fn focus_launcher() -> Task<Message> {
     iced::widget::operation::focus(launcher::input_id())
 }
@@ -1913,6 +2018,7 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
                     let request = bar.launcher.begin_clips();
                     Task::batch([Task::perform(clipboard::list(), move |clips| Message::ClipboardList(request, clips)), focus_launcher()])
                 }
+                launcher::Page::Wallpapers => Task::batch([resize_launcher(bar), Task::perform(gallery::list(), Message::GalleryList), focus_launcher()]),
                 _ => focus_launcher(),
             }
         }
@@ -1958,6 +2064,10 @@ fn activate_launcher_item(bar: &mut Bar, index: usize, secondary: bool) -> Task<
 /// searches it once typing pauses.
 fn set_launcher_query(bar: &mut Bar, query: String) -> Task<Message> {
     bar.launcher.set_query(query.clone());
+    // The search moves the selection to the first matching wallpaper.
+    if bar.launcher.page() == launcher::Page::Wallpapers {
+        return gallery_colors(bar);
+    }
     if query.trim().is_empty() {
         return load_preview(bar);
     }

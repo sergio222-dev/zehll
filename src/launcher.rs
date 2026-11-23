@@ -8,7 +8,7 @@ use iced::{Alignment, Border, Color, Element, Font, Length, Padding, mouse};
 
 use crate::apps::{self, App, Score};
 use crate::keybinds::Keybind;
-use crate::{calc, clipboard, files, fuzzy, tray};
+use crate::{calc, clipboard, files, fuzzy, gallery, tray};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
@@ -29,6 +29,11 @@ const DETAIL_HEIGHT: f32 = 30.0;
 // Open-window marker, the green of the media player's source tag.
 const RUNNING: Color = Color::from_rgb8(0x5f, 0xe3, 0x9a);
 pub const WIDTH: u32 = 720;
+/// The Wallpapers page is wider and taller, for a grid of 4 x 3 tiles.
+pub const GALLERY_SIZE: (u32, u32) = (1040, 640);
+const TILE_HEIGHT: f32 = 146.0;
+const TILE_GAP: f32 = 12.0;
+const ACCENT_HEIGHT: f32 = 58.0;
 // Search bar, list and footer, plus the two dividers.
 pub const HEIGHT: u32 = (SEARCH_HEIGHT + SECTION_HEIGHT + ROW_HEIGHT * VISIBLE_ROWS as f32 + LIST_PADDING + FOOTER_HEIGHT + 2.0) as u32;
 
@@ -39,11 +44,12 @@ pub enum Page {
     Clipboard,
     Keybinds,
     Calculator,
+    Wallpapers,
 }
 
 impl Page {
     /// Pages opened from Home, in the order Home lists them.
-    const CHILDREN: [Page; 4] = [Page::Files, Page::Clipboard, Page::Keybinds, Page::Calculator];
+    const CHILDREN: [Page; 5] = [Page::Files, Page::Clipboard, Page::Keybinds, Page::Calculator, Page::Wallpapers];
 
     /// Label of the search bar chip.
     pub fn chip(self) -> &'static str {
@@ -53,6 +59,7 @@ impl Page {
             Page::Clipboard => "CLIP",
             Page::Keybinds => "KEYS",
             Page::Calculator => "CALC",
+            Page::Wallpapers => "WALLPAPERS",
         }
     }
 
@@ -64,6 +71,7 @@ impl Page {
             Page::Clipboard => "content_paste",
             Page::Keybinds => "keyboard",
             Page::Calculator => "calculate",
+            Page::Wallpapers => "wallpaper",
         }
     }
 
@@ -74,6 +82,7 @@ impl Page {
             Page::Clipboard => "Filter clipboard entries",
             Page::Keybinds => "Search keybindings",
             Page::Calculator => "Do math, convert units, or search past calculations",
+            Page::Wallpapers => "Filter wallpapers by name",
         }
     }
 
@@ -84,6 +93,7 @@ impl Page {
             Page::Clipboard => "Clipboard",
             Page::Keybinds => "Keybinds",
             Page::Calculator => "Calculator",
+            Page::Wallpapers => "Wallpapers",
         }
     }
 
@@ -94,6 +104,7 @@ impl Page {
             Page::Clipboard => "Clipboard history",
             Page::Keybinds => "Hyprland keybindings",
             Page::Calculator => "Math, units and currency",
+            Page::Wallpapers => "Desktop wallpaper and accent color",
         }
     }
 }
@@ -224,6 +235,7 @@ pub fn calculator_enter(launcher: &Launcher) -> CalcEnter {
 pub fn empty_text(page: Page) -> &'static str {
     match page {
         Page::Calculator => "NO MATCHING HISTORY",
+        Page::Wallpapers => "NO WALLPAPERS IN ~/Pictures/Wallpapers",
         Page::Home | Page::Files | Page::Clipboard | Page::Keybinds => "NO RESULTS",
     }
 }
@@ -251,6 +263,8 @@ pub fn items(launcher: &Launcher) -> Vec<Item> {
         Page::Calculator => history_items(launcher),
         Page::Files => file_items(launcher),
         Page::Clipboard => clip_items(launcher),
+        // A grid of tiles, not rows: see `gallery_body`.
+        Page::Wallpapers => Vec::new(),
     }
 }
 
@@ -519,6 +533,7 @@ pub fn hints(page: Page) -> &'static [(&'static str, &'static str)] {
         Page::Calculator => &[("↵", "copy"), ("^↵", "reuse"), ("TAB", "history"), ("⇧ESC", "back")],
         Page::Files => &[("↵", "open"), ("^↵", "path"), ("⇧ESC", "back")],
         Page::Clipboard => &[("↵", "copy"), ("^↵", "pin"), ("⇧ESC", "back")],
+        Page::Wallpapers => &[("↑↓←→", "move"), ("↵", "apply"), ("^R", "random"), ("ALT ←→", "accent"), ("⇧ESC", "back")],
     }
 }
 
@@ -568,6 +583,15 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         let clear_color = if launcher.clear_armed() { theme.accent } else { theme.text };
         search = search.push(bracket_button(theme, "delete_sweep", clear_color, Message::ClipboardClear));
     }
+    if page == Page::Wallpapers {
+        let shown = launcher.gallery_shown().len();
+        if shown > 0 {
+            let position = format!("{} OF {shown}", launcher.selected + 1);
+            search = search.push(text(position).font(CONDENSED_BOLD).size(12).color(theme.text_muted));
+        }
+        search = search.push(bracket_button(theme, "shuffle", theme.text, Message::LauncherNav(Nav::Random)));
+        search = search.push(bracket_button(theme, "folder_open", theme.text, Message::OpenWallpaperFolder));
+    }
     let search = search
         .spacing(14)
         .align_y(Alignment::Center)
@@ -599,6 +623,7 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         }
     };
     let body: Element<'_, Message> = match launcher.answer().filter(|_| page == Page::Calculator) {
+        _ if page == Page::Wallpapers => gallery_body(theme, launcher, bar.wallpaper.path.as_deref()),
         Some(answer) => column![answer_card(theme, answer), header, list].height(Length::Fill).into(),
         None if has_preview(page) => {
             let divider = container(Space::new()).width(1).height(Length::Fill).style(move |_| container::background(theme.border));
@@ -633,6 +658,97 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         .push(content)
         .push(shape(shape::Kind::Brackets { arm: 18.0, width: 2.0 }, theme.accent))
         .into()
+}
+
+/// The Wallpapers page: a grid of thumbnails, 4 x 3 at a time, and the accent strip.
+fn gallery_body<'a>(theme: crate::theme::Theme, launcher: &'a Launcher, current: Option<&std::path::Path>) -> Element<'a, Message> {
+    let shown = launcher.gallery_shown();
+    if shown.is_empty() {
+        let empty = match launcher.gallery.entries.is_empty() {
+            true => empty_text(Page::Wallpapers),
+            false => "NO RESULTS",
+        };
+        return container(text(empty).font(CONDENSED_BOLD).size(14).color(theme.text_muted)).center(Length::Fill).into();
+    }
+    let first = launcher.gallery.first_row * gallery::COLUMNS;
+    let tiles: Vec<(usize, &gallery::Entry)> =
+        shown.iter().enumerate().skip(first).take(gallery::COLUMNS * gallery::ROWS).map(|(at, &index)| (at, &launcher.gallery.entries[index])).collect();
+    let rows = Column::with_children(tiles.chunks(gallery::COLUMNS).map(|chunk| {
+        let mut cells: Vec<Element<'a, Message>> =
+            chunk.iter().map(|&(at, entry)| tile(theme, launcher, entry, at, current == Some(entry.path.as_path()))).collect();
+        // A short last row keeps the tiles' width.
+        while cells.len() < gallery::COLUMNS {
+            cells.push(Space::new().width(Length::Fill).into());
+        }
+        Row::with_children(cells).spacing(TILE_GAP).into()
+    }))
+    .spacing(TILE_GAP);
+    let grid = mouse_area(container(rows).padding([14, 16]).height(Length::Fill)).on_scroll(|delta| {
+        let rows = match delta {
+            mouse::ScrollDelta::Lines { y, .. } => -y.signum() as i32,
+            mouse::ScrollDelta::Pixels { y, .. } => -(y / TILE_HEIGHT).round() as i32,
+        };
+        Message::GalleryScroll(rows)
+    });
+
+    let colors = launcher.gallery_selected().and_then(|entry| launcher.gallery.colors.get(&entry.path));
+    let mut strip = row![text("ACCENT").font(CONDENSED_BOLD).size(12).color(theme.text_muted)].spacing(18).align_y(Alignment::Center);
+    for (index, color) in colors.into_iter().flatten().enumerate() {
+        let Ok(color) = color.parse::<Color>() else {
+            continue;
+        };
+        let ring = if index == launcher.gallery.accent { theme.glow } else { Color::TRANSPARENT };
+        let swatch = container(container(shape(shape::Kind::Diamond, color)).width(24).height(24)).center(34).style(move |_| container::Style {
+            border: Border { color: ring, width: 2.0, radius: 0.0.into() },
+            ..Default::default()
+        });
+        strip = strip.push(button(swatch).on_press(Message::GalleryAccent(index)).padding(0).style(|_, _| button::Style::default()));
+    }
+    let note = match colors {
+        Some(_) => "From the selected wallpaper · applies with it",
+        None => "Reading the colors…",
+    };
+    let strip = strip.push(Space::new().width(Length::Fill)).push(text(note).font(BODY_FONT).size(12).color(theme.text_muted));
+    let strip = container(strip).padding([0, 18]).height(ACCENT_HEIGHT).center_y(ACCENT_HEIGHT);
+    column![grid, line(theme.border), strip].height(Length::Fill).into()
+}
+
+/// One wallpaper: its thumbnail (or a placeholder while it is made), name and size.
+fn tile<'a>(theme: crate::theme::Theme, launcher: &'a Launcher, entry: &'a gallery::Entry, at: usize, current: bool) -> Element<'a, Message> {
+    let picture: Element<'a, Message> = match launcher.gallery.thumbs.get(&entry.path) {
+        Some(thumb) => image(image::Handle::from_path(thumb)).width(Length::Fill).height(Length::Fill).content_fit(iced::ContentFit::Cover).into(),
+        None => container(Space::new()).width(Length::Fill).height(Length::Fill).style(move |_| container::background(theme.section_background)).into(),
+    };
+    let size = entry.size.map(|(w, h)| format!("{w} × {h}")).unwrap_or_default();
+    let label = container(
+        row![
+            text(entry.name.as_str()).font(CONDENSED_BOLD).size(12).color(theme.text).wrapping(text::Wrapping::None),
+            Space::new().width(Length::Fill),
+            text(size).font(BODY_FONT).size(11).color(theme.text_muted),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .padding([0, 10])
+    .height(26)
+    .width(Length::Fill)
+    .center_y(26)
+    .style(move |_| container::background(Color { a: 0.85, ..theme.popup_background }));
+    let mut layers = Stack::new().push(picture).push(container(label).height(Length::Fill).align_bottom(Length::Fill));
+    if current {
+        let tag = container(text("CURRENT").font(CONDENSED_HEAVY).size(12).color(theme.on_accent)).padding(Padding { top: 1.0, right: 14.0, bottom: 1.0, left: 8.0 });
+        layers = layers.push(container(slanted(tag, 7.0, theme.accent)).padding(8));
+    }
+    let selected = at == launcher.selected;
+    let outline = if selected { theme.glow } else { theme.border };
+    let width = if selected { 2.0 } else { 1.0 };
+    // On top: a container's own border is covered by its content.
+    let frame = container(Space::new()).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
+        border: Border { color: outline, width, radius: 0.0.into() },
+        ..Default::default()
+    });
+    let framed = container(layers.push(frame)).width(Length::Fill).height(TILE_HEIGHT).clip(true);
+    mouse_area(framed).on_press(Message::GalleryClick(at)).interaction(mouse::Interaction::Pointer).into()
 }
 
 /// The expression as qalc read it, then the result, as in the design's result card.
@@ -739,6 +855,20 @@ pub enum Nav {
     Move(i32),
     Activate { secondary: bool },
     Pick(usize),
+    /// Left or right, for grids.
+    Sideways(i32),
+    /// Alt+Left or Alt+Right: the previous or next accent color.
+    Accent(i32),
+    /// Ctrl+R: a random wallpaper.
+    Random,
+}
+
+/// Surface size of the launcher on `page`.
+pub fn size(page: Page) -> (u32, u32) {
+    match page {
+        Page::Wallpapers => GALLERY_SIZE,
+        _ => (WIDTH, HEIGHT),
+    }
 }
 
 pub struct Launcher {
@@ -784,6 +914,8 @@ pub struct Launcher {
     pub pinned_only: bool,
     /// Decoded clipboard entries by id.
     decoded: HashMap<u64, clipboard::Decoded>,
+    /// The Wallpapers page.
+    pub gallery: gallery::Gallery,
 }
 
 impl Launcher {
@@ -811,6 +943,7 @@ impl Launcher {
             pins: Vec::new(),
             pinned_only: false,
             decoded: HashMap::new(),
+            gallery: gallery::Gallery::default(),
         }
     }
 
@@ -966,6 +1099,38 @@ impl Launcher {
         self.stack.last().copied().unwrap_or(Page::Home)
     }
 
+    /// Indices into the gallery's entries of the tiles shown, for the search.
+    pub fn gallery_shown(&self) -> Vec<usize> {
+        gallery::filter(&self.gallery.entries, &self.query)
+    }
+
+    /// The wallpaper under the selection.
+    pub fn gallery_selected(&self) -> Option<&gallery::Entry> {
+        self.gallery_shown().get(self.selected).map(|&index| &self.gallery.entries[index])
+    }
+
+    /// Moves the selection among the tiles, scrolling by rows to keep it shown; a new tile
+    /// starts on its first accent.
+    pub fn gallery_move(&mut self, delta: i32) {
+        let len = self.gallery_shown().len();
+        self.gallery_select(gallery::step(self.selected, delta, len));
+    }
+
+    pub fn gallery_select(&mut self, index: usize) {
+        if index != self.selected {
+            self.gallery.accent = 0;
+        }
+        self.selected = index;
+        self.gallery.first_row = gallery::first_row(index, self.gallery.first_row, gallery::ROWS, gallery::COLUMNS);
+    }
+
+    /// Scrolls the grid by rows, keeping the selection where it is.
+    pub fn gallery_scroll(&mut self, rows: i32) {
+        let len = self.gallery_shown().len();
+        let last = len.div_ceil(gallery::COLUMNS).saturating_sub(gallery::ROWS) as i64;
+        self.gallery.first_row = (self.gallery.first_row as i64 + rows as i64).clamp(0, last) as usize;
+    }
+
     pub fn open(&mut self, page: Page) {
         if page == Page::Files {
             self.found.clear();
@@ -983,6 +1148,8 @@ impl Launcher {
         self.query = query;
         self.selected = 0;
         self.first = 0;
+        self.gallery.first_row = 0;
+        self.gallery.accent = 0;
         self.confirm = None;
         self.moved = false;
     }
@@ -1043,10 +1210,15 @@ pub fn nav(key: &keyboard::Key, modifiers: Modifiers) -> Option<Nav> {
         keyboard::Key::Named(Named::Enter) => Some(Nav::Activate { secondary: modifiers.control() }),
         keyboard::Key::Named(Named::ArrowDown) => Some(Nav::Move(1)),
         keyboard::Key::Named(Named::ArrowUp) => Some(Nav::Move(-1)),
+        keyboard::Key::Named(Named::ArrowLeft) if modifiers.alt() => Some(Nav::Accent(-1)),
+        keyboard::Key::Named(Named::ArrowRight) if modifiers.alt() => Some(Nav::Accent(1)),
+        keyboard::Key::Named(Named::ArrowLeft) if modifiers.is_empty() => Some(Nav::Sideways(-1)),
+        keyboard::Key::Named(Named::ArrowRight) if modifiers.is_empty() => Some(Nav::Sideways(1)),
         keyboard::Key::Named(Named::Tab) => Some(Nav::Move(if modifiers.shift() { -1 } else { 1 })),
         keyboard::Key::Character(c) if modifiers.control() => match c.as_str() {
             "j" | "n" => Some(Nav::Move(1)),
             "k" | "p" => Some(Nav::Move(-1)),
+            "r" => Some(Nav::Random),
             digit => match digit.parse::<usize>() {
                 Ok(n @ 1..=9) => Some(Nav::Pick(n - 1)),
                 _ => None,
@@ -1173,16 +1345,62 @@ mod tests {
         launcher
     }
 
+    fn with_wallpapers(count: usize) -> Launcher {
+        let mut launcher = Launcher::new();
+        launcher.open(Page::Wallpapers);
+        launcher.gallery.entries = (0..count)
+            .map(|n| gallery::Entry { path: format!("/w/{n:02}.png").into(), name: format!("{n:02}.png"), size: None, modified: 0, len: 0 })
+            .collect();
+        launcher
+    }
+
+    #[test]
+    fn the_wallpapers_page_is_a_larger_surface() {
+        assert_eq!(size(Page::Wallpapers), (1040, 640));
+        assert_eq!(size(Page::Home), (WIDTH, HEIGHT));
+        assert_eq!(size(Page::Files), (WIDTH, HEIGHT));
+    }
+
+    #[test]
+    fn grid_keys_are_arrows_alt_arrows_and_ctrl_r() {
+        let named = |key| keyboard::Key::Named(key);
+        assert_eq!(nav(&named(Named::ArrowLeft), Modifiers::empty()), Some(Nav::Sideways(-1)));
+        assert_eq!(nav(&named(Named::ArrowRight), Modifiers::empty()), Some(Nav::Sideways(1)));
+        assert_eq!(nav(&named(Named::ArrowRight), Modifiers::ALT), Some(Nav::Accent(1)));
+        assert_eq!(nav(&named(Named::ArrowLeft), Modifiers::ALT), Some(Nav::Accent(-1)));
+        // Shift+arrows still select text in the search.
+        assert_eq!(nav(&named(Named::ArrowLeft), Modifiers::SHIFT), None);
+        assert_eq!(nav(&keyboard::Key::Character("r".into()), Modifiers::CTRL), Some(Nav::Random));
+    }
+
+    #[test]
+    fn the_grid_selection_scrolls_by_rows_and_resets_the_accent() {
+        let mut launcher = with_wallpapers(20);
+        launcher.gallery.accent = 2;
+        launcher.gallery_move(gallery::COLUMNS as i32 * 3);
+        assert_eq!((launcher.selected, launcher.gallery.first_row, launcher.gallery.accent), (12, 1, 0));
+        assert_eq!(launcher.gallery_selected().unwrap().name, "12.png");
+        launcher.gallery_move(1);
+        assert_eq!(launcher.selected, 13);
+        launcher.gallery_scroll(5);
+        assert_eq!(launcher.gallery.first_row, 2);
+        // The search narrows the tiles and starts over.
+        launcher.set_query(String::from("1"));
+        assert_eq!(launcher.gallery_shown().len(), 11);
+        assert_eq!((launcher.selected, launcher.gallery.first_row), (0, 0));
+        assert!(items(&launcher).is_empty());
+    }
+
     #[test]
     fn home_lists_apps_then_pages_then_commands() {
         assert_eq!(
             titles(&with_apps()),
-            ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
+            ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Wallpapers", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
         );
         let items = items(&with_apps());
         assert_eq!((items[0].tag.as_str(), &items[0].action), ("APPLICATION", &Action::App(0)));
         assert_eq!((items[3].tag.as_str(), &items[3].action), ("PAGE", &Action::Open(Page::Files)));
-        assert_eq!((items[11].tag.as_str(), &items[11].action), ("COMMAND", &Action::Power(Power::Shutdown)));
+        assert_eq!((items[12].tag.as_str(), &items[12].action), ("COMMAND", &Action::Power(Power::Shutdown)));
     }
 
     #[test]

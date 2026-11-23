@@ -14,6 +14,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - [Media player](docs/media-player.md) (MPRIS): a play/pause button left of the date opens a player popover, with cover art, seek bar, previous/next, shuffle and repeat.
 - [App launcher](docs/launcher.md): fuzzy search over apps, session commands, files, clipboard history, Hyprland keybindings and a calculator.
 - [Screen snip](docs/screen-snip.md) in the style of ii's region selector: freeze the screen, pick a window or drag a zone, copy, save or edit it.
+- [Wallpapers](docs/wallpapers.md) with ii's workspace parallax, a launcher page to pick them and their accent color, and colors from matugen.
 - One bar per monitor.
 - [Material 3 theme](docs/theme.md) loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -27,6 +28,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 | [Media player](docs/media-player.md) | The media button, its popover and live streams |
 | [Launcher](docs/launcher.md) | The shortcut, keys and every page |
 | [Screen snip](docs/screen-snip.md) | The shortcut, picking and dragging zones, copy, save and edit |
+| [Wallpapers](docs/wallpapers.md) | The parallax, the Wallpapers page and the accent color |
 | [Theme](docs/theme.md) | Colors from matugen and the embedded fonts |
 | [System tray](docs/system-tray.md) | How Zehll shares the tray watcher with other shells |
 
@@ -45,6 +47,7 @@ Some features use optional tools; each page lists its own:
 | [Media player](docs/media-player.md#requirements) | curl, cava |
 | [Launcher](docs/launcher.md#requirements) | qalc, fd, zoxide, file, xdg-open, cliphist, wl-copy |
 | [Screen snip](docs/screen-snip.md#requirements) | grim, wl-copy, swappy, xdg-user-dir |
+| [Wallpapers](docs/wallpapers.md#requirements) | matugen, xdg-user-dir |
 | [Theme](docs/theme.md#requirements) | matugen |
 
 ## Build and run
