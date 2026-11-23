@@ -7,7 +7,7 @@ use zbus::fdo::ObjectManagerProxy;
 use zbus::proxy::CacheProperties;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue};
 
-use crate::dbus;
+use crate::{bluetooth_agent, dbus};
 
 const SERVICE: &str = "org.bluez";
 const ADAPTER: &str = "org.bluez.Adapter1";
@@ -83,7 +83,16 @@ pub async fn run(action: DeviceAction) {
         let connection = Connection::system().await?;
         match &action {
             DeviceAction::Connect(path) => dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?.call_method("Connect", &()).await.map(drop),
-            DeviceAction::Pair(path) => dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?.call_method("Pair", &()).await.map(drop),
+            // Like ii and blueman: pair, trust (so the device's profiles connect without asking), connect.
+            DeviceAction::Pair(path) => {
+                let device = dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?;
+                let pairing = bluetooth_agent::pairing(path.as_str());
+                device.call_method("Pair", &()).await?;
+                device.set_property("Trusted", true).await?;
+                let connected = device.call_method("Connect", &()).await.map(drop);
+                drop(pairing);
+                connected
+            }
             DeviceAction::Disconnect(path) => dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?.call_method("Disconnect", &()).await.map(drop),
             DeviceAction::Forget { adapter, device } => {
                 dbus::proxy(&connection, SERVICE, adapter.as_str(), ADAPTER).await?.call_method("RemoveDevice", &(device,)).await.map(drop)

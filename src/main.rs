@@ -3,6 +3,7 @@ mod alert;
 mod apps;
 mod audio;
 mod bluetooth;
+mod bluetooth_agent;
 mod brightness;
 mod calc;
 mod clipboard;
@@ -660,6 +661,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::Keybinds => Message::ToggleLauncherPage(launcher::Page::Keybinds),
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
+        Subscription::run(bluetooth_agent::serve).map(|never| match never {}),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
         window::close_events().map(Message::WindowClosed),
         window::open_events().map(Message::WindowOpened),
