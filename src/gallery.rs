@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 use iced::futures::{SinkExt, Stream};
 use iced::stream;
 
-use crate::{fuzzy, wallpaper};
+use crate::{cache, fuzzy, wallpaper};
 
 pub const COLUMNS: usize = 4;
 pub const ROWS: usize = 3;
@@ -42,6 +42,20 @@ pub struct Gallery {
     pub accent: usize,
     /// First row shown.
     pub first_row: usize,
+    /// The thumbnails being made; replacing or dropping it stops them.
+    thumbs_task: Option<iced::task::Handle>,
+}
+
+impl Gallery {
+    /// Keeps `handle` as the running thumbnail task, stopping the previous one.
+    pub fn track(&mut self, handle: iced::task::Handle) {
+        self.thumbs_task = Some(handle.abort_on_drop());
+    }
+
+    /// Stops making thumbnails, e.g. when the launcher closes.
+    pub fn stop(&mut self) {
+        self.thumbs_task = None;
+    }
 }
 
 pub fn is_image(path: &Path) -> bool {
@@ -142,8 +156,18 @@ fn list_blocking(folder: &Path) -> Vec<Entry> {
 }
 
 fn thumbs_dir() -> PathBuf {
-    let home = || PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cache")).join("zehll/thumbs")
+    cache::dir("thumbs")
+}
+
+/// The cached thumbnail of `entry`: named after its path, size and modification time.
+fn thumb_file(entry: &Entry) -> PathBuf {
+    thumbs_dir().join(wallpaper::cache_name(&entry.path.to_string_lossy(), entry.len, entry.modified, THUMB).replace(".png", ".jpg"))
+}
+
+/// Deletes thumbnails of images no longer in the folder, or of older versions of them.
+pub fn prune_thumbs(entries: &[Entry]) {
+    let keep: Vec<PathBuf> = entries.iter().map(thumb_file).collect();
+    cache::prune(&thumbs_dir(), &["jpg"], &keep, keep.len());
 }
 
 /// Thumbnails of `entries`, made (or found in the cache) a few at a time, each sent as soon as
@@ -166,15 +190,14 @@ pub fn thumbnails(entries: Vec<Entry>) -> impl Stream<Item = (PathBuf, Option<Pa
 
 fn thumbnail(entry: &Entry) -> Option<PathBuf> {
     let dir = thumbs_dir();
-    let name = wallpaper::cache_name(&entry.path.to_string_lossy(), entry.len, entry.modified, THUMB).replace(".png", ".jpg");
-    let file = dir.join(name);
+    let file = thumb_file(entry);
     if file.exists() {
         return Some(file);
     }
     std::fs::create_dir_all(&dir).ok()?;
     let image = ::image::open(&entry.path).ok()?;
     let thumb = image.resize_to_fill(THUMB.0, THUMB.1, ::image::imageops::FilterType::Triangle).to_rgb8();
-    let partial = file.with_extension("part");
+    let partial = cache::partial(&file);
     thumb.save_with_format(&partial, ::image::ImageFormat::Jpeg).ok()?;
     std::fs::rename(&partial, &file).ok()?;
     Some(file)
@@ -262,5 +285,19 @@ mod tests {
         assert_eq!(cycle(3, 1, 4), 0);
         assert_eq!(cycle(0, -1, 4), 3);
         assert_eq!(cycle(2, 1, 0), 0);
+    }
+
+    #[test]
+    fn a_new_thumbnail_task_stops_the_previous_one() {
+        let mut gallery = Gallery::default();
+        let (_, first) = iced::Task::<()>::none().abortable();
+        let (_, second) = iced::Task::<()>::none().abortable();
+        let (first_probe, second_probe) = (first.clone(), second.clone());
+        gallery.track(first);
+        assert!(!first_probe.is_aborted());
+        gallery.track(second);
+        assert!(first_probe.is_aborted() && !second_probe.is_aborted());
+        gallery.stop();
+        assert!(second_probe.is_aborted());
     }
 }

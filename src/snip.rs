@@ -3,7 +3,6 @@
 
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::Arc;
 
 use chrono::NaiveDateTime;
 use iced::widget::canvas::{self, Frame, Geometry, Path, Stroke};
@@ -177,7 +176,7 @@ pub fn file_name(now: NaiveDateTime) -> String {
 #[derive(Clone)]
 pub struct Shot {
     pub monitor: Monitor,
-    pub frame: Arc<RgbaImage>,
+    /// The frozen frame. Its pixels are shared with the snip that crops them, never copied.
     pub handle: Handle,
     pub regions: Vec<Region>,
 }
@@ -198,8 +197,8 @@ pub async fn capture() -> Vec<Shot> {
         let regions = regions(&monitor, &clients, &layers);
         async move {
             let frame = grab(&monitor.name).await?;
-            let handle = Handle::from_rgba(frame.width(), frame.height(), frame.as_raw().clone());
-            Some(Shot { monitor, frame: Arc::new(frame), handle, regions })
+            let handle = Handle::from_rgba(frame.width(), frame.height(), frame.into_raw());
+            Some(Shot { monitor, handle, regions })
         }
     });
     iced::futures::future::join_all(grabs).await.into_iter().flatten().collect()
@@ -237,18 +236,40 @@ pub enum Action {
     Edit,
 }
 
+/// Width and height of a frame held as raw pixels.
+pub fn dimensions(frame: &Handle) -> Option<(u32, u32)> {
+    match frame {
+        Handle::Rgba { width, height, .. } => Some((*width, *height)),
+        _ => None,
+    }
+}
+
+/// `area` (x, y, width, height in physical pixels) of a frame held as raw pixels.
+fn cropped(frame: &Handle, area: (u32, u32, u32, u32)) -> Option<RgbaImage> {
+    let Handle::Rgba { width: frame_width, pixels, .. } = frame else {
+        return None;
+    };
+    let (x, y, width, height) = area;
+    let (stride, row) = (*frame_width as usize * 4, width as usize * 4);
+    let mut crop = Vec::with_capacity(row * height as usize);
+    for line in y as usize..(y + height) as usize {
+        let start = line * stride + x as usize * 4;
+        crop.extend_from_slice(pixels.get(start..start + row)?);
+    }
+    RgbaImage::from_raw(width, height, crop)
+}
+
 /// Crops `frame` to `area` (physical pixels) and copies, saves or edits it.
-pub async fn deliver(frame: Arc<RgbaImage>, area: (u32, u32, u32, u32), action: Action) {
+pub async fn deliver(frame: Handle, area: (u32, u32, u32, u32), action: Action) {
     let encode = move || {
-        let (x, y, width, height) = area;
-        let crop = ::image::imageops::crop_imm(frame.as_ref(), x, y, width, height).to_image();
+        let crop = cropped(&frame, area)?;
         let mut png = Vec::new();
-        crop.write_to(&mut std::io::Cursor::new(&mut png), ::image::ImageFormat::Png).map(|()| png)
+        Some(crop.write_to(&mut std::io::Cursor::new(&mut png), ::image::ImageFormat::Png).map(|()| png))
     };
     let png = match tokio::task::spawn_blocking(encode).await {
-        Ok(Ok(png)) => png,
-        Ok(Err(err)) => return eprintln!("zehll: cannot encode the snip: {err}"),
-        Err(_) => return,
+        Ok(Some(Ok(png))) => png,
+        Ok(Some(Err(err))) => return eprintln!("zehll: cannot encode the snip: {err}"),
+        Ok(None) | Err(_) => return,
     };
     match action {
         Action::Edit => {
@@ -597,6 +618,20 @@ fn canvas<'a>(overlay: Overlay<'a>) -> canvas::Canvas<Overlay<'a>, Message> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn snips_crop_the_shared_frame() {
+        // 3x2 frame: each pixel's red is its index.
+        let pixels: Vec<u8> = (0..6u8).flat_map(|index| [index, 0, 0, 255]).collect();
+        let frame = Handle::from_rgba(3, 2, pixels);
+        assert_eq!(dimensions(&frame), Some((3, 2)));
+        let crop = cropped(&frame, (1, 0, 2, 2)).unwrap();
+        assert_eq!(crop.dimensions(), (2, 2));
+        assert_eq!(crop.pixels().map(|pixel| pixel[0]).collect::<Vec<_>>(), [1, 2, 4, 5]);
+        // A frame that is not raw pixels has nothing to crop.
+        let path = Handle::from_path("/tmp/frame.png");
+        assert_eq!((dimensions(&path), cropped(&path, (0, 0, 1, 1))), (None, None));
+    }
 
     fn monitor() -> Monitor {
         Monitor { name: "DP-1".into(), x: 1920.0, y: 0.0, width: 2560, height: 1440, scale: 1.0, workspace: 1, focused: true }

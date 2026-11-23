@@ -11,7 +11,7 @@ use iced::widget::canvas::{self, Canvas};
 use iced::widget::image::Handle;
 use iced::{Element, Length, Rectangle, Renderer, Theme, mouse};
 
-use crate::{Message, hyprland, snip, workspaces};
+use crate::{Message, cache, hyprland, snip, workspaces};
 
 /// ii's `background.parallax.workspaceZoom`: the wallpaper is this much larger than the screen.
 pub const ZOOM: f32 = 1.07;
@@ -101,6 +101,9 @@ impl Pan {
         self.started.is_some_and(|started| now.saturating_duration_since(started) < PAN)
     }
 }
+
+/// Scaled wallpapers kept in the cache (a few wallpapers for each monitor); the oldest go first.
+const MAX_SCALED: usize = 12;
 
 /// Cache file of a scaled wallpaper: a stable hash of the source (path, size, modification
 /// time) with the scaled size, so a changed file or monitor gets a new one.
@@ -209,11 +212,6 @@ fn state_file() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".local/state")).join("zehll/wallpapers.json")
 }
 
-fn cache_dir() -> PathBuf {
-    let home = || PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cache")).join("zehll/wallpaper")
-}
-
 fn read_state_file() -> serde_json::Value {
     std::fs::read_to_string(state_file()).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
 }
@@ -265,7 +263,7 @@ pub async fn prepare(source: PathBuf) -> Option<Vec<Scaled>> {
 fn prepare_blocking(source: &Path, monitors: &[(String, (u32, u32))]) -> Option<Vec<Scaled>> {
     let metadata = std::fs::metadata(source).ok()?;
     let modified = metadata.modified().ok().and_then(|time| time.duration_since(UNIX_EPOCH).ok()).map_or(0, |time| time.as_secs());
-    let dir = cache_dir();
+    let dir = cache::dir("wallpaper");
     std::fs::create_dir_all(&dir).ok()?;
     let dimensions = match ::image::image_dimensions(source) {
         Ok(dimensions) => dimensions,
@@ -280,7 +278,9 @@ fn prepare_blocking(source: &Path, monitors: &[(String, (u32, u32))]) -> Option<
     for (monitor, screen) in monitors {
         let size = cover(dimensions, *screen, ZOOM);
         let file = dir.join(cache_name(&source.to_string_lossy(), metadata.len(), modified, size));
-        if !file.exists() {
+        if file.exists() {
+            cache::touch(&file);
+        } else {
             if image.is_none() {
                 image = match ::image::open(source) {
                     Ok(image) => Some(image),
@@ -295,12 +295,14 @@ fn prepare_blocking(source: &Path, monitors: &[(String, (u32, u32))]) -> Option<
         }
         all.push(Scaled { monitor: monitor.clone(), screen: *screen, size, file });
     }
+    let current: Vec<PathBuf> = all.iter().map(|scaled| scaled.file.clone()).collect();
+    cache::prune(&dir, &["png"], &current, MAX_SCALED);
     Some(all)
 }
 
 /// Fast PNG: a cache file read back once per start.
 fn write_png(path: &Path, image: &::image::RgbImage) -> Option<()> {
-    let partial = path.with_extension("part");
+    let partial = cache::partial(path);
     let written = std::fs::File::create(&partial).map_err(::image::ImageError::IoError).and_then(|file| {
         let encoder = ::image::codecs::png::PngEncoder::new_with_quality(
             std::io::BufWriter::new(file),
