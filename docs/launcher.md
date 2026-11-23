@@ -14,6 +14,31 @@ or, with a Lua config:
 hl.bind("SUPER + SPACE", hl.dsp.global("zehll:launcherToggle"))
 ```
 
+### Open it with a SUPER tap
+
+To open the launcher by tapping SUPER alone, like ii's search, while SUPER + any key keeps doing its own thing, send `zehll:launcherTap` from a release bind. Zehll acts on that shortcut only when it is released, so the config decides whether the tap counts: SUPER arms it, any other key or click while SUPER is held cancels it.
+
+```lua
+local armed = false
+local function fire()
+    if armed then hl.dispatch(hl.dsp.global("zehll:launcherTap")) end
+    armed = false
+end
+for _, key in ipairs({ "SUPER_L", "SUPER_R" }) do
+    hl.bind(key, function() armed = true end, { ignore_mods = true, transparent = true })
+    hl.bind(key, fire, { ignore_mods = true, transparent = true, release = true })
+end
+-- Cancel on every other key and click held with SUPER (non-consuming, so their binds still run).
+local keys = { "Tab", "Return", "space", "Escape", "mouse:272", "mouse:273", "mouse_up", "mouse_down" }
+for c = string.byte("a"), string.byte("z") do table.insert(keys, string.char(c)) end
+for i = 0, 9 do table.insert(keys, tostring(i)) end
+for _, key in ipairs(keys) do
+    hl.bind("SUPER + " .. key, function() armed = false end, { non_consuming = true, ignore_mods = true, transparent = true })
+end
+```
+
+Add any other key you use with SUPER to the list; a key missing from it does not cancel the tap. `zehll:launcherToggle` from a release bind does nothing, because Hyprland sends it as released.
+
 Type to search; the list is fuzzy matched. Up/Down, Tab/Shift+Tab, Ctrl+J/K and Ctrl+N/P move the selection, Ctrl+1–9 picks a visible row, Enter runs the selected row and Ctrl+Enter its secondary action. Escape closes the launcher; Shift+Escape clears the search, else goes back to Home. Clicking outside closes it too.
 
 - **Home** lists apps from their desktop entries, the other pages and the session commands Lock, Suspend, Logout, Restart and Shutdown (the last three need a second Enter). Apps you launch often come first: each launch adds to the app's score, which halves every 14 days, kept in `~/.local/state/zehll/launcher.json`. Enter focuses an open window of the app or starts it (terminal apps in `$TERMINAL`, else kitty); Ctrl+Enter starts its first desktop action. A green diamond marks apps with an open window.
