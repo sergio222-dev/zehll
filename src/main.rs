@@ -9,6 +9,7 @@ mod clipboard;
 mod calendar;
 mod cava;
 mod dbus;
+mod emoji;
 mod files;
 mod flame;
 mod flashbang;
