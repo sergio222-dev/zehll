@@ -1,6 +1,7 @@
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use iced::futures::{SinkExt, Stream};
 use iced::stream;
@@ -25,7 +26,19 @@ fn request(command: &str) -> Option<serde_json::Value> {
 }
 
 fn request_text(command: &str) -> Option<String> {
-    let mut socket = StdUnixStream::connect(socket_dir()?.join(".socket.sock")).ok()?;
+    request_at(&socket_dir()?.join(".socket.sock"), command, TIMEOUT)
+}
+
+/// How long a request may wait for Hyprland. Replies take well under a millisecond; a stuck
+/// compositor must not freeze the bar, which asks from its update loop.
+const TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Sends `command` to the socket at `path` and reads the whole reply, giving up after `timeout`
+/// on each read or write.
+fn request_at(path: &Path, command: &str, timeout: Duration) -> Option<String> {
+    let mut socket = StdUnixStream::connect(path).ok()?;
+    socket.set_read_timeout(Some(timeout)).ok()?;
+    socket.set_write_timeout(Some(timeout)).ok()?;
     socket.write_all(command.as_bytes()).ok()?;
     let mut reply = String::new();
     socket.read_to_string(&mut reply).ok()?;
@@ -266,6 +279,33 @@ pub fn cursor_x_on_focused_monitor() -> Option<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn requests_read_the_reply_and_give_up_on_a_stuck_socket() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("zehll-socket-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let answering = dir.join("answering.sock");
+        let listener = UnixListener::bind(&answering).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = [0; 64];
+            let read = stream.read(&mut command).unwrap();
+            stream.write_all(format!("got {}", String::from_utf8_lossy(&command[..read])).as_bytes()).unwrap();
+        });
+        assert_eq!(request_at(&answering, "j/monitors", TIMEOUT).as_deref(), Some("got j/monitors"));
+        server.join().unwrap();
+
+        // Accepts but never answers nor closes, like a compositor that hangs.
+        let stuck = dir.join("stuck.sock");
+        let listener = UnixListener::bind(&stuck).unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(request_at(&stuck, "j/monitors", Duration::from_millis(100)), None);
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(listener);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn lua_strings_escape_quotes_backslashes_and_newlines() {
