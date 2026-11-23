@@ -50,7 +50,7 @@ mod wallpaper;
 mod workspaces;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -194,7 +194,7 @@ struct Bar {
     // `gcal.py auth` is waiting for the browser sign-in.
     meetings_signing_in: bool,
     // Meeting alerts already raised, so each fires once (see `meetings::due_alerts`).
-    meetings_fired: HashSet<String>,
+    meetings_fired: meetings::Fired,
     // Meetings that started and still show an alert card, the ringing one first.
     meeting_alerts: Vec<meetings::Meeting>,
     alert_surface: Option<Id>,
@@ -335,7 +335,7 @@ impl Bar {
             meetings: Vec::new(),
             meetings_status: meetings::Status::Ok,
             meetings_signing_in: false,
-            meetings_fired: HashSet::new(),
+            meetings_fired: meetings::Fired::new(),
             meeting_alerts: Vec::new(),
             alert_surface: None,
             ringing: None,

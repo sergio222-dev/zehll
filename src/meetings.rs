@@ -1,7 +1,7 @@
 //! Google Calendar meetings fetched by `scripts/gcal.py`, and the pure rules the bar
 //! pill, its tooltip and the calendar popover are drawn from.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Days, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeDelta, TimeZone};
@@ -293,13 +293,14 @@ pub enum AlertKind {
     Start,
 }
 
+/// Alerts already raised, with the start of their meeting.
+pub type Fired = HashMap<String, NaiveDateTime>;
+
 /// Alerts that became due at `now`, each meeting at most once per kind.
 /// `fired` remembers what already fired; a rescheduled meeting fires again.
-pub fn due_alerts<'a>(
-    meetings: &'a [Meeting],
-    now: NaiveDateTime,
-    fired: &mut HashSet<String>,
-) -> Vec<(AlertKind, &'a Meeting)> {
+pub fn due_alerts<'a>(meetings: &'a [Meeting], now: NaiveDateTime, fired: &mut Fired) -> Vec<(AlertKind, &'a Meeting)> {
+    // Past the late window an alert can't fire again, so it needs no memory.
+    fired.retain(|_, start| *start >= now - TimeDelta::minutes(LATE_MINUTES));
     meetings
         .iter()
         .filter_map(|meeting| {
@@ -311,7 +312,7 @@ pub fn due_alerts<'a>(
             } else {
                 return None;
             };
-            fired.insert(format!("{kind:?}|{}|{}", meeting.id, meeting.start)).then_some((kind, meeting))
+            fired.insert(format!("{kind:?}|{}|{}", meeting.id, meeting.start), meeting.start).is_none().then_some((kind, meeting))
         })
         .collect()
 }
@@ -508,7 +509,7 @@ mod tests {
         assert!(!has_meet_link(&m));
     }
 
-    fn due(meetings: &[Meeting], now: NaiveDateTime, fired: &mut HashSet<String>) -> Vec<(AlertKind, String)> {
+    fn due(meetings: &[Meeting], now: NaiveDateTime, fired: &mut Fired) -> Vec<(AlertKind, String)> {
         due_alerts(meetings, now, fired).into_iter().map(|(kind, m)| (kind, m.id.clone())).collect()
     }
 
@@ -531,7 +532,7 @@ mod tests {
     #[test]
     fn warning_fires_once_inside_the_lead_window() {
         let meetings = day();
-        let mut fired = HashSet::new();
+        let mut fired = Fired::new();
         assert!(due(&meetings, at(21, 9, 54), &mut fired).is_empty());
         assert_eq!(due(&meetings, at(21, 9, 55), &mut fired), [(AlertKind::Warning, "review".to_string())]);
         assert!(due(&meetings, at(21, 9, 57), &mut fired).is_empty());
@@ -540,14 +541,14 @@ mod tests {
     #[test]
     fn start_card_fires_once_at_start_and_while_late() {
         let meetings = day();
-        let mut fired = HashSet::new();
+        let mut fired = Fired::new();
         due(&meetings, at(21, 9, 56), &mut fired);
         assert_eq!(due(&meetings, at(21, 10, 0), &mut fired), [(AlertKind::Start, "review".to_string())]);
         assert!(due(&meetings, at(21, 10, 1), &mut fired).is_empty());
 
-        let mut late = HashSet::new();
+        let mut late = Fired::new();
         assert_eq!(due(&meetings, at(21, 10, 5), &mut late), [(AlertKind::Start, "review".to_string())]);
-        let mut too_late = HashSet::new();
+        let mut too_late = Fired::new();
         assert!(due(&meetings, at(21, 10, 5) + TimeDelta::seconds(1), &mut too_late).is_empty());
     }
 
@@ -555,7 +556,7 @@ mod tests {
     fn overlapping_meetings_alert_together_and_reschedules_fire_again() {
         let mut meetings = day();
         meetings.push(meeting("one-on-one", at(21, 10, 0), at(21, 10, 30)));
-        let mut fired = HashSet::new();
+        let mut fired = Fired::new();
         assert_eq!(
             due(&meetings, at(21, 10, 0), &mut fired),
             [(AlertKind::Start, "review".to_string()), (AlertKind::Start, "one-on-one".to_string())]
@@ -563,5 +564,19 @@ mod tests {
 
         meetings[1].start = at(21, 11, 0);
         assert_eq!(due(&meetings, at(21, 10, 56), &mut fired), [(AlertKind::Warning, "review".to_string())]);
+    }
+
+    #[test]
+    fn fired_alerts_are_forgotten_once_they_cannot_fire_again() {
+        let meetings = day();
+        let mut fired = Fired::new();
+        due(&meetings, at(21, 9, 56), &mut fired);
+        due(&meetings, at(21, 10, 0), &mut fired);
+        assert_eq!(fired.len(), 2);
+        // Still inside the late window: kept, so nothing fires twice.
+        assert!(due(&meetings, at(21, 10, 5), &mut fired).is_empty());
+        assert_eq!(fired.len(), 2);
+        assert!(due(&meetings, at(21, 10, 6), &mut fired).is_empty());
+        assert!(fired.is_empty());
     }
 }
