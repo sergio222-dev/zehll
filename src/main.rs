@@ -656,6 +656,8 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::WallpaperRandom => Message::RandomWallpaper,
             shortcuts::Shortcut::Wallhaven => Message::ToggleLauncherPage(launcher::Page::Wallhaven),
             shortcuts::Shortcut::Emojis => Message::ToggleLauncherPage(launcher::Page::Emojis),
+            shortcuts::Shortcut::Clipboard => Message::ToggleLauncherPage(launcher::Page::Clipboard),
+            shortcuts::Shortcut::Keybinds => Message::ToggleLauncherPage(launcher::Page::Keybinds),
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),

@@ -28,10 +28,14 @@ pub enum Shortcut {
     Wallhaven,
     /// The launcher on its Emojis page.
     Emojis,
+    /// The launcher on its Clipboard page.
+    Clipboard,
+    /// The launcher on its Keybinds page.
+    Keybinds,
 }
 
 impl Shortcut {
-    const ALL: [Shortcut; 9] = [
+    const ALL: [Shortcut; 11] = [
         Shortcut::PanelToggle,
         Shortcut::MeetingTest,
         Shortcut::LauncherToggle,
@@ -41,6 +45,8 @@ impl Shortcut {
         Shortcut::WallpaperRandom,
         Shortcut::Wallhaven,
         Shortcut::Emojis,
+        Shortcut::Clipboard,
+        Shortcut::Keybinds,
     ];
 
     fn name(self) -> &'static str {
@@ -54,6 +60,8 @@ impl Shortcut {
             Shortcut::WallpaperRandom => "wallpaperRandom",
             Shortcut::Wallhaven => "wallhaven",
             Shortcut::Emojis => "emojis",
+            Shortcut::Clipboard => "clipboard",
+            Shortcut::Keybinds => "keybinds",
         }
     }
 
@@ -68,6 +76,8 @@ impl Shortcut {
             Shortcut::WallpaperRandom => "Apply a random wallpaper",
             Shortcut::Wallhaven => "Toggle the launcher on its Wallhaven page",
             Shortcut::Emojis => "Toggle the launcher on its Emojis page",
+            Shortcut::Clipboard => "Toggle the launcher on its Clipboard page",
+            Shortcut::Keybinds => "Toggle the launcher on its Keybinds page",
         }
     }
 
