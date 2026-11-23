@@ -19,9 +19,15 @@ const PATH: &str = "/org/freedesktop/Notifications";
 /// `NotificationClosed` reasons from the specification.
 pub const DISMISSED: u32 = 2;
 const CLOSED_BY_CALL: u32 = 3;
+/// Used when the history drops a notification to make room.
+pub const UNDEFINED: u32 = 4;
 pub const DEFAULT_ACTION: &str = "default";
 // How long a popup stays when the client leaves it to the server (`expire_timeout` of -1).
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Notifications kept in the panel; older ones are dropped and reported as closed.
+pub const MAX_HISTORY: usize = 50;
+/// Largest side of a stored `image-data` picture: the panel shows it at 32 px, so 64 covers 2x scaling.
+const MAX_IMAGE_SIDE: u32 = 64;
 
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -75,6 +81,29 @@ fn image_data_rgba(width: i32, height: i32, rowstride: i32, has_alpha: bool, dat
     Some(rgba)
 }
 
+/// Adds a notification at the top, or replaces the one with its id in place, and drops the oldest
+/// past `max`. Returns the ids of the dropped notifications.
+pub fn push(history: &mut Vec<Notification>, notification: Notification, max: usize) -> Vec<u32> {
+    match history.iter_mut().find(|existing| existing.id == notification.id) {
+        Some(existing) => *existing = notification,
+        None => history.insert(0, notification),
+    }
+    history.drain(max.min(history.len())..).map(|dropped| dropped.id).collect()
+}
+
+/// Scales an RGBA picture down so its largest side is at most `max`, keeping the aspect ratio.
+fn shrink(width: u32, height: u32, rgba: Vec<u8>, max: u32) -> (u32, u32, Vec<u8>) {
+    if width <= max && height <= max {
+        return (width, height, rgba);
+    }
+    let Some(image) = ::image::RgbaImage::from_raw(width, height, rgba) else {
+        return (0, 0, Vec::new());
+    };
+    let scale = f64::from(max) / f64::from(width.max(height));
+    let (width, height) = (((f64::from(width) * scale).round() as u32).max(1), ((f64::from(height) * scale).round() as u32).max(1));
+    (width, height, ::image::imageops::thumbnail(&image, width, height).into_raw())
+}
+
 /// Picks the notification image: raw `image-data`, then `image-path`, then the app icon.
 fn notification_icon(app_icon: &str, hints: &HashMap<String, OwnedValue>) -> Option<tray::Icon> {
     let image_data = ["image-data", "image_data", "icon_data"].iter().find_map(|key| hints.get(*key));
@@ -83,7 +112,8 @@ fn notification_icon(app_icon: &str, hints: &HashMap<String, OwnedValue>) -> Opt
             <(i32, i32, i32, bool, i32, i32, Vec<u8>)>::try_from(value.try_clone().ok()?)
         && let Some(rgba) = image_data_rgba(width, height, rowstride, has_alpha, &data)
     {
-        return Some(tray::Icon::Raster(iced::widget::image::Handle::from_rgba(width as u32, height as u32, rgba)));
+        let (width, height, rgba) = shrink(width as u32, height as u32, rgba, MAX_IMAGE_SIDE);
+        return Some(tray::Icon::Raster(iced::widget::image::Handle::from_rgba(width, height, rgba)));
     }
     let path = ["image-path", "image_path"]
         .iter()
@@ -284,6 +314,53 @@ mod tests {
         assert_eq!(image_data_rgba(2, 1, 8, false, &[1, 2, 3, 4, 5, 6, 0, 0]), Some(vec![1, 2, 3, 255, 4, 5, 6, 255]));
         assert_eq!(image_data_rgba(1, 1, 4, true, &[9, 8, 7, 6]), Some(vec![9, 8, 7, 6]));
         assert_eq!(image_data_rgba(2, 2, 6, false, &[0; 6]), None);
+    }
+
+    fn notification(id: u32) -> Notification {
+        Notification {
+            id,
+            app_name: String::from("probe"),
+            summary: format!("n{id}"),
+            body: String::new(),
+            critical: false,
+            time: Local::now(),
+            timeout: None,
+            actions: Vec::new(),
+            icon: None,
+        }
+    }
+
+    fn ids(history: &[Notification]) -> Vec<u32> {
+        history.iter().map(|notification| notification.id).collect()
+    }
+
+    #[test]
+    fn caps_the_history() {
+        let mut history = Vec::new();
+        for id in 1..=3 {
+            assert!(push(&mut history, notification(id), 3).is_empty());
+        }
+        assert_eq!(ids(&history), [3, 2, 1]);
+        assert_eq!(push(&mut history, notification(4), 3), [1]);
+        assert_eq!(ids(&history), [4, 3, 2]);
+        // A replacement keeps its place and drops nothing.
+        let mut replaced = notification(3);
+        replaced.summary = String::from("updated");
+        assert!(push(&mut history, replaced, 3).is_empty());
+        assert_eq!(ids(&history), [4, 3, 2]);
+        assert_eq!(history[1].summary, "updated");
+    }
+
+    #[test]
+    fn shrinks_large_images() {
+        let (width, height, rgba) = shrink(256, 128, vec![7; 256 * 128 * 4], 64);
+        assert_eq!((width, height, rgba.len()), (64, 32, 64 * 32 * 4));
+        assert!(rgba.iter().all(|&byte| byte == 7));
+        // Small pictures are kept as they are.
+        assert_eq!(shrink(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8], 64), (2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]));
+        // Very thin pictures keep at least one pixel on the short side.
+        let (width, height, rgba) = shrink(1000, 1, vec![0; 4000], 64);
+        assert_eq!((width, height, rgba.len()), (64, 1, 64 * 4));
     }
 
     #[test]

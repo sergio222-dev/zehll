@@ -1439,16 +1439,23 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::Notifications(notifications::Event::Ready(handle)) => bar.notifications_handle = Some(handle),
         Message::Notifications(notifications::Event::Notify(notification)) => {
             let (id, timeout) = (notification.id, notification.timeout);
-            match bar.notifications.iter_mut().find(|existing| existing.id == id) {
-                Some(existing) => *existing = notification,
-                None => bar.notifications.insert(0, notification),
-            }
+            let dropped = notifications::push(&mut bar.notifications, notification, notifications::MAX_HISTORY);
+            let shown = bar.popups.len();
+            bar.popups.retain(|popup| !dropped.contains(&popup.id));
+            let closed = match (dropped.is_empty(), bar.notifications_handle.clone()) {
+                (false, Some(handle)) => Task::future(handle.closed(dropped, notifications::UNDEFINED)).discard(),
+                _ => Task::none(),
+            };
             if !bar.do_not_disturb {
                 bar.popups.retain(|popup| popup.id != id);
                 bar.popups.insert(0, Popup { id, expires: timeout.map(|timeout| Instant::now() + timeout) });
                 bar.popups.truncate(popup::MAX_VISIBLE);
-                return sync_popups(bar);
+                return Task::batch([closed, sync_popups(bar)]);
             }
+            if bar.popups.len() != shown {
+                return Task::batch([closed, sync_popups(bar)]);
+            }
+            return closed;
         }
         Message::Notifications(notifications::Event::Close(id)) => {
             bar.notifications.retain(|notification| notification.id != id);
