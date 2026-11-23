@@ -50,7 +50,13 @@ Type to search; the list is fuzzy matched. Up/Down, Tab/Shift+Tab, Ctrl+J/K and 
   hl.bind("SUPER + V", hl.dsp.global("zehll:clipboard"), { description = "Utilities: Clipboard history" })
   ```
 
-- **Keybinds** lists every Hyprland keybinding that has a description, searchable by keys or description.
+- **Keybinds** lists every Hyprland keybinding that has a description, searchable by keys or description. The global shortcut `zehll:keybinds` opens the launcher straight on this page (and closes it when it is there); to put it on ii's cheatsheet combo, Super+/, with a Lua config:
+
+  ```lua
+  hl.unbind("SUPER + Slash")
+  hl.bind("SUPER + Slash", hl.dsp.global("zehll:keybinds"), { description = "Shell: Keybinds" })
+  ```
+
 - **Calculator** evaluates the search with qalc as you type: math, units and currencies. Enter copies the result and keeps it in a history of 25 (`~/.local/state/zehll/calculator.json`); Ctrl+Enter puts `(result)` back in the search; Tab walks the history and Enter on a past calculation reuses it.
 - **Wallpapers** shows the wallpaper folder as a grid and applies the selected one with its accent color; see [Wallpapers](wallpapers.md).
 - **Wallhaven** searches wallhaven.cc with its filters and applies or keeps a result; see [Wallpapers](wallpapers.md#the-wallhaven-page).
