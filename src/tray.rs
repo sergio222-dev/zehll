@@ -7,12 +7,15 @@ use iced::widget::{image, svg};
 use system_tray::client::{Client, Event, UpdateEvent};
 use system_tray::item::{IconPixmap, StatusNotifierItem};
 use system_tray::menu::TrayMenu;
+use tokio::sync::broadcast;
 
 pub const ICON_SIZE: u16 = 18;
 
 #[derive(Debug, Clone)]
 pub enum TrayEvent {
     Ready(Arc<Client>),
+    /// Drop every item: a fresh snapshot of `Add` events follows.
+    Reset,
     Event(Event),
 }
 
@@ -74,17 +77,7 @@ pub fn events() -> impl Stream<Item = TrayEvent> {
         };
         let mut events = client.subscribe();
 
-        let initial: Vec<_> = client
-            .items()
-            .lock()
-            .unwrap()
-            .iter()
-            .flat_map(|(address, (item, menu))| {
-                let add = Event::Add(address.clone(), Box::new(item.clone()));
-                let menu = menu.clone().map(|menu| Event::Update(address.clone(), UpdateEvent::Menu(menu)));
-                std::iter::once(add).chain(menu)
-            })
-            .collect();
+        let initial = snapshot(&client);
         if output.send(TrayEvent::Ready(client.clone())).await.is_err() {
             return;
         }
@@ -94,12 +87,51 @@ pub fn events() -> impl Stream<Item = TrayEvent> {
             }
         }
 
-        while let Ok(event) = events.recv().await {
-            if output.send(TrayEvent::Event(event)).await.is_err() {
-                return;
+        loop {
+            let batch = match step(events.recv().await) {
+                Step::Forward(event) => vec![TrayEvent::Event(event)],
+                Step::Resync => std::iter::once(TrayEvent::Reset).chain(snapshot(&client).into_iter().map(TrayEvent::Event)).collect(),
+                Step::Stop => return,
+            };
+            for event in batch {
+                if output.send(event).await.is_err() {
+                    return;
+                }
             }
         }
     })
+}
+
+#[derive(Debug)]
+enum Step {
+    Forward(Event),
+    /// The receiver fell behind and missed events: rebuild the items from the client.
+    Resync,
+    Stop,
+}
+
+/// What to do with a broadcast result: lagging is recoverable, only a closed channel ends the stream.
+fn step(result: Result<Event, broadcast::error::RecvError>) -> Step {
+    match result {
+        Ok(event) => Step::Forward(event),
+        Err(broadcast::error::RecvError::Lagged(_)) => Step::Resync,
+        Err(broadcast::error::RecvError::Closed) => Step::Stop,
+    }
+}
+
+/// The client's current items as `Add` events, followed by their menus.
+fn snapshot(client: &Client) -> Vec<Event> {
+    client
+        .items()
+        .lock()
+        .unwrap()
+        .iter()
+        .flat_map(|(address, (item, menu))| {
+            let add = Event::Add(address.clone(), Box::new(item.clone()));
+            let menu = menu.clone().map(|menu| Event::Update(address.clone(), UpdateEvent::Menu(menu)));
+            std::iter::once(add).chain(menu)
+        })
+        .collect()
 }
 
 /// The GTK icon theme, read once: `default_theme_gtk` runs `gsettings` on every call.
@@ -137,4 +169,17 @@ fn pixmap_icon(pixmaps: &[IconPixmap]) -> Option<Icon> {
         .flat_map(|argb| [argb[1], argb[2], argb[3], argb[0]])
         .collect();
     Some(Icon::Raster(image::Handle::from_rgba(pixmap.width as u32, pixmap.height as u32, rgba)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use broadcast::error::RecvError;
+
+    #[test]
+    fn forwards_events_and_resyncs_after_lagging() {
+        assert!(matches!(step(Ok(Event::Remove(String::from(":1.42")))), Step::Forward(Event::Remove(address)) if address == ":1.42"));
+        assert!(matches!(step(Err(RecvError::Lagged(7))), Step::Resync));
+        assert!(matches!(step(Err(RecvError::Closed)), Step::Stop));
+    }
 }

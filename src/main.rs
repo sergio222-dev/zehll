@@ -777,6 +777,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return Task::done(Message::NewLayerShell { settings, id });
         }
         Message::Tray(tray::TrayEvent::Ready(client)) => bar.tray_client = Some(client),
+        Message::Tray(tray::TrayEvent::Reset) => {
+            bar.tray_items.clear();
+            if bar.open_menu().is_some() {
+                return close_tray_menu(bar);
+            }
+        }
         Message::Tray(tray::TrayEvent::Event(event)) => match event {
             TrayEvent::Add(address, item) => {
                 bar.tray_items.insert(address, tray::TrayItem::new(&item));
