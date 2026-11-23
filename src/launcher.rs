@@ -9,7 +9,7 @@ use iced::{Alignment, Border, Color, Element, Font, Length, Padding, mouse};
 use crate::apps::{self, App, Score};
 use crate::keybinds::Keybind;
 use crate::{calc, clipboard, emoji, files, fuzzy, gallery, tray, wallhaven};
-use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
+use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, MONO, MONO_VALUE, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
 pub const VISIBLE_ROWS: usize = 7;
@@ -343,7 +343,7 @@ fn clip_preview<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Eleme
     let decoded = launcher.decoded(entry.id);
     let content: Element<'a, Message> = match (decoded.and_then(|decoded| decoded.image.clone()), decoded.and_then(|decoded| decoded.text.as_deref())) {
         (Some(handle), _) => container(image(handle).content_fit(iced::ContentFit::Contain)).padding(10).center(Length::Fill).into(),
-        (None, Some(preview)) => container(text(preview).font(Font::MONOSPACE).size(11).color(theme.text_muted))
+        (None, Some(preview)) => container(text(preview).font(MONO).size(11).color(theme.text_muted))
             .padding(10)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -403,7 +403,7 @@ fn file_preview<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Eleme
     };
     let text_preview = launcher.details(&entry.path).and_then(|details| details.preview.as_deref());
     let content: Element<'a, Message> = match (entry.is_dir, text_preview) {
-        (false, Some(preview)) => container(text(preview).font(Font::MONOSPACE).size(11).color(theme.text_muted).wrapping(text::Wrapping::None))
+        (false, Some(preview)) => container(text(preview).font(MONO).size(11).color(theme.text_muted).wrapping(text::Wrapping::None))
             .padding(10)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -888,7 +888,7 @@ fn emoji_tile<'a>(theme: crate::theme::Theme, picker: &'a emoji::Picker, index: 
     }
     let count = emoji::count(&picker.counts, base);
     if counts && count > 0 {
-        let label = text(format!("{count}×")).font(Font::MONOSPACE).size(10).color(theme.text_dim);
+        let label = text(format!("{count}×")).font(MONO).size(10).color(theme.text_dim);
         layers = layers.push(container(label).padding([4, 8]).align_right(Length::Fill).align_bottom(Length::Fill));
     }
     let (outline, width) = if selected { (theme.glow, 2.0) } else { (theme.border, 1.0) };
@@ -908,7 +908,7 @@ fn emoji_name<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Element
     let emoji = emoji::with_tone(base, launcher.emoji.tone);
     let mut name = row![text(emoji.name()).font(BODY_FONT).size(12).color(theme.text)].spacing(10).align_y(Alignment::Center);
     if let Some(code) = base.shortcode() {
-        name = name.push(text(format!(":{code}:")).font(Font::MONOSPACE).size(11).color(theme.text_muted));
+        name = name.push(text(format!(":{code}:")).font(MONO).size(11).color(theme.text_muted));
     }
     name.into()
 }
@@ -993,14 +993,14 @@ fn tile_row<'a>(mut cells: Vec<Element<'a, Message>>, columns: usize, gap: f32) 
 
 /// The expression as qalc read it, then the result, as in the design's result card.
 fn answer_card(theme: crate::theme::Theme, answer: &calc::Answer) -> Element<'_, Message> {
-    let side = |content: String, color: Color| {
-        container(text(content).font(CONDENSED_BOLD).size(30).color(color).wrapping(text::Wrapping::None)).center_x(Length::Fill).center_y(Length::Fill).clip(true)
+    let side = |content: String, font: Font, color: Color| {
+        container(text(content).font(font).size(26).color(color).wrapping(text::Wrapping::None)).center_x(Length::Fill).center_y(Length::Fill).clip(true)
     };
     let sign = container(text(answer.sign).font(CONDENSED_BOLD).size(26).color(theme.text_muted)).center(44).style(move |_| container::Style {
         border: Border { color: theme.border, width: 1.0, radius: 0.0.into() },
         ..Default::default()
     });
-    let card = row![side(answer.expression.clone(), theme.text), container(sign).height(Length::Fill).center_y(Length::Fill), side(answer.result.clone(), theme.accent)]
+    let card = row![side(answer.expression.clone(), MONO, theme.text), container(sign).height(Length::Fill).center_y(Length::Fill), side(answer.result.clone(), MONO_VALUE, theme.accent)]
         .height(Length::Fill)
         .align_y(Alignment::Center);
     container(container(card).height(Length::Fill).style(move |_| container::Style {
@@ -1035,8 +1035,8 @@ fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: 
     let icon = column![container(icon).center_x(26).height(APP_ICON), running].spacing(1).align_x(Alignment::Center);
     let title = match item.title_style {
         TitleStyle::Body => text(item.title).font(BODY_BOLD).size(15),
-        TitleStyle::Keys => text(item.title).font(CONDENSED_BOLD).size(16),
-        TitleStyle::Mono => text(item.title).font(Font::MONOSPACE).size(14),
+        TitleStyle::Keys => text(item.title).font(MONO).size(14),
+        TitleStyle::Mono => text(item.title).font(MONO).size(14),
     }
     .wrapping(text::Wrapping::None);
     // Without a description the title takes the room, cut at the edge, as clipboard text runs long.
@@ -1066,7 +1066,7 @@ fn item_row<'a>(theme: crate::theme::Theme, item: Item, index: usize, selected: 
             // A keybinding's description reads as text, not as a label.
             TitleStyle::Keys => text(item.tag).font(BODY_FONT).size(13).color(theme.text_muted),
             TitleStyle::Body => text(item.tag).font(CONDENSED_BOLD).size(12).color(theme.text_muted),
-            TitleStyle::Mono => text(item.tag).font(CONDENSED_BOLD).size(17).color(theme.text),
+            TitleStyle::Mono => text(item.tag).font(MONO_VALUE).size(15).color(theme.text),
         },
         trash,
     ]

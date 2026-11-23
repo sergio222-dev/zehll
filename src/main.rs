@@ -93,6 +93,19 @@ const BODY_BOLD: Font = Font { weight: Weight::Semibold, ..BODY_FONT };
 const CONDENSED: Font = Font { weight: Weight::Semibold, ..Font::with_name("Barlow Condensed") };
 const CONDENSED_BOLD: Font = Font { weight: Weight::Bold, ..CONDENSED };
 const CONDENSED_HEAVY: Font = Font { weight: Weight::ExtraBold, style: FontStyle::Italic, ..CONDENSED };
+/// MonoLisa Code for code and data, read from the system fonts by name: its license does not
+/// allow shipping it, so it is never embedded. Without it, text falls back to another face.
+const MONO: Font = Font::with_name("MonoLisaCode");
+/// Values that update on their own, so fixed-width digits keep them from shifting.
+const MONO_VALUE: Font = Font { weight: Weight::Semibold, ..MONO };
+/// MonoLisa's advance, the same for every character, in ems.
+const MONO_ADVANCE: f32 = 0.64;
+
+/// Width of `chars` characters of `MONO` at `size`, rounded up to whole pixels.
+fn mono_width(chars: usize, size: f32) -> f32 {
+    // The small margin keeps float error (32.000004) from adding a pixel.
+    (chars as f32 * MONO_ADVANCE * size - 1e-3).ceil().max(0.0)
+}
 
 const TOOLTIP_WIDTH: u32 = 320;
 const TOOLTIP_HEADER_HEIGHT: u32 = 70;
@@ -2986,6 +2999,14 @@ fn style(bar: &Bar, _: &iced::Theme) -> iced::theme::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mono_widths_cover_whole_characters() {
+        // 4 × 0.64 × 14 = 35.84.
+        assert_eq!(mono_width(4, 14.0), 36.0);
+        assert_eq!(mono_width(0, 14.0), 0.0);
+        assert_eq!(mono_width(5, 10.0), 32.0);
+    }
 
     #[test]
     fn tooltips_hang_centered_under_the_pointer_inside_the_monitor() {

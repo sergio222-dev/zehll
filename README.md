@@ -33,7 +33,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 | [Screen snip](docs/screen-snip.md) | The shortcut, picking and dragging zones, copy, save and edit |
 | [Wallpapers](docs/wallpapers.md) | The parallax, the Wallpapers and Wallhaven pages and the accent color |
 | [Volume indicator](docs/volume-osd.md) | When it shows and hides, boost and mute |
-| [Theme](docs/theme.md) | Colors from matugen and the embedded fonts |
+| [Theme](docs/theme.md) | Colors from matugen, the embedded fonts and MonoLisa |
 | [System tray](docs/system-tray.md) | How Zehll shares the tray watcher with other shells |
 
 ## Requirements
@@ -54,7 +54,7 @@ Some features use optional tools; each page lists its own:
 | [Screen snip](docs/screen-snip.md#requirements) | grim, wl-copy, swappy, xdg-user-dir |
 | [Wallpapers](docs/wallpapers.md#requirements) | matugen, xdg-user-dir, curl |
 | [Volume indicator](docs/volume-osd.md#requirements) | pactl, wpctl |
-| [Theme](docs/theme.md#requirements) | matugen |
+| [Theme](docs/theme.md#requirements) | matugen, MonoLisa Code |
 
 ## Build and run
 
