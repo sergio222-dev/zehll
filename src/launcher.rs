@@ -8,7 +8,7 @@ use iced::{Alignment, Border, Color, Element, Font, Length, Padding, mouse};
 
 use crate::apps::{self, App, Score};
 use crate::keybinds::Keybind;
-use crate::{calc, clipboard, files, fuzzy, gallery, tray, wallhaven};
+use crate::{calc, clipboard, emoji, files, fuzzy, gallery, tray, wallhaven};
 use crate::{BODY_BOLD, BODY_FONT, Bar, CONDENSED_BOLD, CONDENSED_HEAVY, ICON_FONT, Message, glow_style, line, panel_style, shape, slanted};
 
 /// Rows shown at once; the list scrolls past them.
@@ -35,6 +35,14 @@ const TILE_HEIGHT: f32 = 146.0;
 const TILE_GAP: f32 = 12.0;
 const ACCENT_HEIGHT: f32 = 58.0;
 const WALLHAVEN_TILE_HEIGHT: f32 = 150.0;
+/// The Emojis page is taller, for rows of large emojis.
+pub const EMOJI_SIZE: (u32, u32) = (WIDTH, 560);
+const EMOJI_PADDING: f32 = 12.0;
+/// Named, or fallback picks a font with outline-only emoji glyphs for many of them.
+const EMOJI_FONT: Font = Font::with_name("Noto Color Emoji");
+/// Height the emoji grid lays its lines out in: the surface less the search, footer, dividers
+/// and the grid's padding.
+const EMOJI_GRID_HEIGHT: f32 = EMOJI_SIZE.1 as f32 - SEARCH_HEIGHT - FOOTER_HEIGHT - 2.0 - 2.0 * EMOJI_PADDING;
 // Search bar, list and footer, plus the two dividers.
 pub const HEIGHT: u32 = (SEARCH_HEIGHT + SECTION_HEIGHT + ROW_HEIGHT * VISIBLE_ROWS as f32 + LIST_PADDING + FOOTER_HEIGHT + 2.0) as u32;
 
@@ -47,11 +55,12 @@ pub enum Page {
     Calculator,
     Wallpapers,
     Wallhaven,
+    Emojis,
 }
 
 impl Page {
     /// Pages opened from Home, in the order Home lists them.
-    const CHILDREN: [Page; 6] = [Page::Files, Page::Clipboard, Page::Keybinds, Page::Calculator, Page::Wallpapers, Page::Wallhaven];
+    const CHILDREN: [Page; 7] = [Page::Files, Page::Clipboard, Page::Keybinds, Page::Calculator, Page::Wallpapers, Page::Wallhaven, Page::Emojis];
 
     /// Label of the search bar chip.
     pub fn chip(self) -> &'static str {
@@ -63,6 +72,7 @@ impl Page {
             Page::Calculator => "CALC",
             Page::Wallpapers => "WALLPAPERS",
             Page::Wallhaven => "WALLHAVEN",
+            Page::Emojis => "EMOJIS",
         }
     }
 
@@ -76,6 +86,7 @@ impl Page {
             Page::Calculator => "calculate",
             Page::Wallpapers => "wallpaper",
             Page::Wallhaven => "travel_explore",
+            Page::Emojis => "mood",
         }
     }
 
@@ -88,6 +99,7 @@ impl Page {
             Page::Calculator => "Do math, convert units, or search past calculations",
             Page::Wallpapers => "Filter wallpapers by name",
             Page::Wallhaven => "Search wallpapers on Wallhaven",
+            Page::Emojis => "Search emojis",
         }
     }
 
@@ -100,6 +112,7 @@ impl Page {
             Page::Calculator => "Calculator",
             Page::Wallpapers => "Wallpapers",
             Page::Wallhaven => "Wallhaven",
+            Page::Emojis => "Emojis",
         }
     }
 
@@ -112,6 +125,7 @@ impl Page {
             Page::Calculator => "Math, units and currency",
             Page::Wallpapers => "Desktop wallpaper and accent color",
             Page::Wallhaven => "Search and download wallpapers",
+            Page::Emojis => "Type or copy an emoji",
         }
     }
 }
@@ -243,7 +257,7 @@ pub fn empty_text(page: Page) -> &'static str {
     match page {
         Page::Calculator => "NO MATCHING HISTORY",
         Page::Wallpapers => "NO WALLPAPERS IN ~/Pictures/Wallpapers",
-        Page::Wallhaven => "NO RESULTS",
+        Page::Wallhaven | Page::Emojis => "NO RESULTS",
         Page::Home | Page::Files | Page::Clipboard | Page::Keybinds => "NO RESULTS",
     }
 }
@@ -272,7 +286,7 @@ pub fn items(launcher: &Launcher) -> Vec<Item> {
         Page::Files => file_items(launcher),
         Page::Clipboard => clip_items(launcher),
         // A grid of tiles, not rows: see `gallery_body`.
-        Page::Wallpapers | Page::Wallhaven => Vec::new(),
+        Page::Wallpapers | Page::Wallhaven | Page::Emojis => Vec::new(),
     }
 }
 
@@ -543,6 +557,7 @@ pub fn hints(page: Page) -> &'static [(&'static str, &'static str)] {
         Page::Clipboard => &[("↵", "copy"), ("^↵", "pin"), ("⇧ESC", "back")],
         Page::Wallpapers => &[("↑↓←→", "move"), ("↵", "apply"), ("^R", "random"), ("ALT ←→", "accent"), ("⇧ESC", "back")],
         Page::Wallhaven => &[("↑↓←→", "move"), ("↵", "apply"), ("^↵", "save + apply"), ("⇧ESC", "back")],
+        Page::Emojis => &[("↑↓←→", "move"), ("↵", "type"), ("^↵", "copy"), ("ALT ←→", "tone")],
     }
 }
 
@@ -644,6 +659,7 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
     let body: Element<'_, Message> = match launcher.answer().filter(|_| page == Page::Calculator) {
         _ if page == Page::Wallpapers => gallery_body(theme, launcher, bar.wallpaper.path.as_deref()),
         _ if page == Page::Wallhaven => wallhaven_body(theme, launcher),
+        _ if page == Page::Emojis => emoji_body(theme, launcher),
         Some(answer) => column![answer_card(theme, answer), header, list].height(Length::Fill).into(),
         None if has_preview(page) => {
             let divider = container(Space::new()).width(1).height(Length::Fill).style(move |_| container::background(theme.border));
@@ -664,6 +680,10 @@ pub fn view(bar: &Bar) -> Element<'_, Message> {
         row![key, text(*label).font(BODY_FONT).size(12).color(theme.text_muted)].spacing(6).align_y(Alignment::Center).into()
     }))
     .spacing(18);
+    let hints = match page {
+        Page::Emojis => hints.push(Space::new().width(Length::Fill)).push(emoji_name(theme, launcher)),
+        _ => hints,
+    };
     let footer = container(hints)
         .padding([0, 18])
         .height(FOOTER_HEIGHT)
@@ -824,6 +844,75 @@ fn wallhaven_body<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Ele
     body.into()
 }
 
+/// The Emojis page: the grid's lines from the first one shown, as many as fit.
+fn emoji_body<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Element<'a, Message> {
+    let picker = &launcher.emoji;
+    if picker.shown.is_empty() {
+        return container(text(empty_text(Page::Emojis)).font(CONDENSED_BOLD).size(14).color(theme.text_muted)).center(Length::Fill).into();
+    }
+    let mut height = 0.0;
+    let mut lines = Column::new().spacing(emoji::GAP);
+    for line in &picker.lines[picker.first_line.min(picker.lines.len())..] {
+        if height >= EMOJI_GRID_HEIGHT {
+            break;
+        }
+        height += line.height();
+        lines = lines.push(match line {
+            emoji::Line::Header(title) => {
+                container(text(*title).font(CONDENSED_BOLD).size(13).color(theme.text_dim)).height(emoji::HEADER_HEIGHT).align_bottom(emoji::HEADER_HEIGHT).into()
+            }
+            emoji::Line::Row { emojis, counts } => {
+                let tiles = emojis.clone().map(|index| emoji_tile(theme, picker, index, *counts, index == launcher.selected)).collect();
+                tile_row(tiles, emoji::COLUMNS, emoji::GAP)
+            }
+        });
+    }
+    mouse_area(container(lines).padding([EMOJI_PADDING, 16.0]).width(Length::Fill).height(Length::Fill).clip(true))
+        .on_scroll(|delta| {
+            let rows = match delta {
+                mouse::ScrollDelta::Lines { y, .. } => -y.signum() as i32,
+                mouse::ScrollDelta::Pixels { y, .. } => -(y / emoji::TILE_HEIGHT).round() as i32,
+            };
+            Message::EmojiScroll(rows)
+        })
+        .into()
+}
+
+/// One emoji, in the chosen tone, with a + when it has tones and its count when asked.
+fn emoji_tile<'a>(theme: crate::theme::Theme, picker: &'a emoji::Picker, index: usize, counts: bool, selected: bool) -> Element<'a, Message> {
+    let base = picker.shown[index];
+    let glyph = container(text(emoji::with_tone(base, picker.tone).as_str()).font(EMOJI_FONT).size(44).shaping(text::Shaping::Advanced)).center(Length::Fill);
+    let mut layers = Stack::new().push(glyph);
+    if emoji::has_tones(base) {
+        layers = layers.push(container(text("+").font(CONDENSED_BOLD).size(13).color(theme.text_dim)).padding([4, 8]).align_right(Length::Fill));
+    }
+    let count = emoji::count(&picker.counts, base);
+    if counts && count > 0 {
+        let label = text(format!("{count}×")).font(Font::MONOSPACE).size(10).color(theme.text_dim);
+        layers = layers.push(container(label).padding([4, 8]).align_right(Length::Fill).align_bottom(Length::Fill));
+    }
+    let (outline, width) = if selected { (theme.glow, 2.0) } else { (theme.border, 1.0) };
+    let frame = container(Space::new()).width(Length::Fill).height(Length::Fill).style(move |_| container::Style {
+        border: Border { color: outline, width, radius: 0.0.into() },
+        ..Default::default()
+    });
+    let tile = container(layers.push(frame)).width(Length::Fill).height(emoji::TILE_HEIGHT).clip(true);
+    mouse_area(tile).on_press(Message::EmojiClick(index)).interaction(mouse::Interaction::Pointer).into()
+}
+
+/// The selected emoji's name and shortcode, at the right of the footer.
+fn emoji_name<'a>(theme: crate::theme::Theme, launcher: &'a Launcher) -> Element<'a, Message> {
+    let Some(base) = launcher.emoji.shown.get(launcher.selected) else {
+        return Space::new().into();
+    };
+    let emoji = emoji::with_tone(base, launcher.emoji.tone);
+    let mut name = row![text(emoji.name()).font(BODY_FONT).size(12).color(theme.text)].spacing(10).align_y(Alignment::Center);
+    if let Some(code) = base.shortcode() {
+        name = name.push(text(format!(":{code}:")).font(Font::MONOSPACE).size(11).color(theme.text_muted));
+    }
+    name.into()
+}
+
 /// What a grid tile shows.
 struct Tile<'a> {
     thumb: Option<&'a std::path::Path>,
@@ -889,13 +978,17 @@ fn tile_rows<'a>(tiles: Vec<Element<'a, Message>>, columns: usize) -> Element<'a
     let mut rows = Vec::new();
     let mut tiles = tiles.into_iter().peekable();
     while tiles.peek().is_some() {
-        let mut cells: Vec<Element<'a, Message>> = tiles.by_ref().take(columns).collect();
-        while cells.len() < columns {
-            cells.push(Space::new().width(Length::Fill).into());
-        }
-        rows.push(Row::with_children(cells).spacing(TILE_GAP).into());
+        rows.push(tile_row(tiles.by_ref().take(columns).collect(), columns, TILE_GAP));
     }
     Column::with_children(rows).spacing(TILE_GAP).into()
+}
+
+/// One row of at most `columns` tiles `gap` apart, padded so its tiles keep their width.
+fn tile_row<'a>(mut cells: Vec<Element<'a, Message>>, columns: usize, gap: f32) -> Element<'a, Message> {
+    while cells.len() < columns {
+        cells.push(Space::new().width(Length::Fill).into());
+    }
+    Row::with_children(cells).spacing(gap).into()
 }
 
 /// The expression as qalc read it, then the result, as in the design's result card.
@@ -1014,6 +1107,7 @@ pub enum Nav {
 pub fn size(page: Page) -> (u32, u32) {
     match page {
         Page::Wallpapers | Page::Wallhaven => GALLERY_SIZE,
+        Page::Emojis => EMOJI_SIZE,
         _ => (WIDTH, HEIGHT),
     }
 }
@@ -1065,6 +1159,10 @@ pub struct Launcher {
     pub gallery: gallery::Gallery,
     /// The Wallhaven page.
     pub wallhaven: wallhaven::Browser,
+    /// The Emojis page.
+    pub emoji: emoji::Picker,
+    /// The window focused when the launcher opened, which gets a picked emoji.
+    pub previous_window: Option<String>,
 }
 
 impl Launcher {
@@ -1094,6 +1192,8 @@ impl Launcher {
             decoded: HashMap::new(),
             gallery: gallery::Gallery::default(),
             wallhaven: wallhaven::Browser::default(),
+            emoji: emoji::Picker::default(),
+            previous_window: None,
         }
     }
 
@@ -1102,6 +1202,7 @@ impl Launcher {
         let home = std::env::var("HOME").unwrap_or_default();
         let mut launcher = Self { scores: apps::load_scores(), history: calc::load_history(), pins: clipboard::load_pins(), home, ..Self::new() };
         launcher.wallhaven.filters = wallhaven::Filters::parse(&crate::wallpaper::load_section("wallhaven"));
+        launcher.emoji = emoji::Picker::load();
         launcher
     }
 
@@ -1293,6 +1394,29 @@ impl Launcher {
         self.wallhaven.first_row = (self.wallhaven.first_row as i64 + rows as i64).clamp(0, last) as usize;
     }
 
+    /// Selects the emoji at `index`, scrolling to keep its row (and the header above it) shown.
+    pub fn emoji_select(&mut self, index: usize) {
+        self.selected = index.min(self.emoji.shown.len().saturating_sub(1));
+        if let Some(line) = emoji::line_of(&self.emoji.lines, self.selected) {
+            self.emoji.first_line = emoji::first_line(&self.emoji.lines, line, self.emoji.first_line, EMOJI_GRID_HEIGHT);
+        }
+    }
+
+    /// Moves the selection `rows` rows up or down.
+    pub fn emoji_vertical(&mut self, rows: i32) {
+        self.emoji_select(emoji::vertical(&self.emoji.lines, self.selected, rows));
+    }
+
+    /// Moves the selection to the emoji beside it.
+    pub fn emoji_sideways(&mut self, delta: i32) {
+        self.emoji_select(emoji::sideways(self.selected, delta, self.emoji.shown.len()));
+    }
+
+    /// Scrolls the emoji grid by lines, keeping the selection where it is.
+    pub fn emoji_scroll(&mut self, rows: i32) {
+        self.emoji.first_line = emoji::scroll(&self.emoji.lines, self.emoji.first_line, rows, EMOJI_GRID_HEIGHT);
+    }
+
     /// Scrolls the grid by rows, keeping the selection where it is.
     pub fn gallery_scroll(&mut self, rows: i32) {
         let len = self.gallery_shown().len();
@@ -1321,6 +1445,9 @@ impl Launcher {
         self.gallery.accent = 0;
         self.confirm = None;
         self.moved = false;
+        if self.page() == Page::Emojis {
+            self.emoji.refresh(&self.query);
+        }
     }
 
     /// Clears the search, else goes back a page. False when there is nothing to undo.
@@ -1529,6 +1656,36 @@ mod tests {
         assert_eq!(size(Page::Wallhaven), (1040, 640));
         assert_eq!(size(Page::Home), (WIDTH, HEIGHT));
         assert_eq!(size(Page::Files), (WIDTH, HEIGHT));
+        assert_eq!(size(Page::Emojis), (720, 560));
+    }
+
+    #[test]
+    fn the_emojis_page_lays_out_on_entering_and_follows_the_selection() {
+        let mut launcher = Launcher::new();
+        launcher.emoji.counts.insert(String::from("🍌"), 3);
+        launcher.open(Page::Emojis);
+        assert_eq!(launcher.emoji.lines[0], emoji::Line::Header("MOST USED"));
+        assert_eq!(launcher.emoji.text(0), Some("🍌"));
+        // Down from MOST USED crosses the SMILEYS header, in the same column.
+        launcher.emoji_vertical(1);
+        assert_eq!(launcher.selected, 1);
+        launcher.emoji_sideways(2);
+        assert_eq!(launcher.selected, 3);
+        for _ in 0..10 {
+            launcher.emoji_vertical(1);
+        }
+        assert_eq!(launcher.selected, 63);
+        assert!(launcher.emoji.first_line > 0);
+        let line = emoji::line_of(&launcher.emoji.lines, launcher.selected).unwrap();
+        let shown: f32 = launcher.emoji.lines[launcher.emoji.first_line..=line].iter().map(emoji::Line::height).sum();
+        assert!(shown <= EMOJI_GRID_HEIGHT);
+        // A search flattens the grid and starts over at its top.
+        launcher.set_query(String::from("banana"));
+        assert_eq!((launcher.selected, launcher.emoji.first_line), (0, 0));
+        assert_eq!(launcher.emoji.text(0), Some("🍌"));
+        launcher.emoji.tone = 3;
+        launcher.set_query(String::from("thumbs up"));
+        assert_eq!(launcher.emoji.text(0), Some("👍🏽"));
     }
 
     #[test]
@@ -1565,12 +1722,12 @@ mod tests {
     fn home_lists_apps_then_pages_then_commands() {
         assert_eq!(
             titles(&with_apps()),
-            ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Wallpapers", "Wallhaven", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
+            ["Firefox", "Kitty", "Files", "Files", "Clipboard", "Keybinds", "Calculator", "Wallpapers", "Wallhaven", "Emojis", "Lock", "Suspend", "Logout", "Restart", "Shutdown"]
         );
         let items = items(&with_apps());
         assert_eq!((items[0].tag.as_str(), &items[0].action), ("APPLICATION", &Action::App(0)));
         assert_eq!((items[3].tag.as_str(), &items[3].action), ("PAGE", &Action::Open(Page::Files)));
-        assert_eq!((items[13].tag.as_str(), &items[13].action), ("COMMAND", &Action::Power(Power::Shutdown)));
+        assert_eq!((items[14].tag.as_str(), &items[14].action), ("COMMAND", &Action::Power(Power::Shutdown)));
     }
 
     #[test]
