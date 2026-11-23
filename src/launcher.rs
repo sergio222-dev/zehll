@@ -1024,6 +1024,18 @@ impl Launcher {
 }
 
 /// Maps a key press to navigation; typing is left to the search field.
+/// The navigation a key event triggers. Escape acts when released, other keys when pressed:
+/// closing on the press would hand the release to the window below, and a fullscreen video in
+/// Firefox leaves fullscreen on a lone Escape release.
+pub fn nav_event(event: &keyboard::Event) -> Option<Nav> {
+    let escape = keyboard::Key::Named(Named::Escape);
+    match event {
+        keyboard::Event::KeyPressed { key, modifiers, .. } if *key != escape => nav(key, *modifiers),
+        keyboard::Event::KeyReleased { key, modifiers, .. } if *key == escape => nav(key, *modifiers),
+        _ => None,
+    }
+}
+
 pub fn nav(key: &keyboard::Key, modifiers: Modifiers) -> Option<Nav> {
     match key {
         keyboard::Key::Named(Named::Escape) if modifiers.shift() => Some(Nav::Back),
@@ -1054,6 +1066,24 @@ mod tests {
 
     fn character(c: &str) -> keyboard::Key {
         keyboard::Key::Character(c.into())
+    }
+
+    #[test]
+    fn escape_navigates_on_release_and_other_keys_on_press() {
+        let event = |pressed: bool, key: keyboard::Key, modifiers: Modifiers| {
+            let (physical_key, location) = (keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified), keyboard::Location::Standard);
+            match pressed {
+                true => keyboard::Event::KeyPressed { key: key.clone(), modified_key: key, physical_key, location, modifiers, text: None, repeat: false },
+                false => keyboard::Event::KeyReleased { key: key.clone(), modified_key: key, physical_key, location, modifiers },
+            }
+        };
+        let none = Modifiers::empty();
+        assert_eq!(nav_event(&event(true, named(Named::Escape), none)), None);
+        assert_eq!(nav_event(&event(false, named(Named::Escape), none)), Some(Nav::Close));
+        assert_eq!(nav_event(&event(false, named(Named::Escape), Modifiers::SHIFT)), Some(Nav::Back));
+        assert_eq!(nav_event(&event(true, named(Named::ArrowDown), none)), Some(Nav::Move(1)));
+        assert_eq!(nav_event(&event(false, named(Named::ArrowDown), none)), None);
+        assert_eq!(nav_event(&event(true, named(Named::Enter), Modifiers::CTRL)), Some(Nav::Activate { secondary: true }));
     }
 
     #[test]

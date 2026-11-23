@@ -532,7 +532,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
     // works while typing.
     let launcher_keys = match bar.launcher_surface {
         Some(_) => iced::event::listen_with(|event, _, _| match event {
-            iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => launcher::nav(&key, modifiers).map(Message::LauncherNav),
+            iced::Event::Keyboard(key) => launcher::nav_event(&key).map(Message::LauncherNav),
             _ => None,
         }),
         None => Subscription::none(),

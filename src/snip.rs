@@ -436,9 +436,10 @@ impl canvas::Program<Message> for Overlay<'_> {
                     None => canvas::Action::request_redraw(),
                 })
             }
-            canvas::Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(keyboard::key::Named::Escape), .. }) => {
-                Some(canvas::Action::publish(Message::CancelSnip).and_capture())
-            }
+            canvas::Event::Keyboard(key) => match escape(key)? {
+                Escape::Swallow => Some(canvas::Action::capture()),
+                Escape::Cancel => Some(canvas::Action::publish(Message::CancelSnip).and_capture()),
+            },
             _ => None,
         }
     }
@@ -489,6 +490,25 @@ impl canvas::Program<Message> for Overlay<'_> {
             true => mouse::Interaction::Crosshair,
             false => mouse::Interaction::default(),
         }
+    }
+}
+
+/// What Escape does on the selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Escape {
+    Swallow,
+    Cancel,
+}
+
+/// Escape cancels on release, not on press: once the selector closes, the keyboard goes back to
+/// the window below, and a window that gets only the release (a fullscreen video in Firefox)
+/// leaves fullscreen.
+fn escape(event: &keyboard::Event) -> Option<Escape> {
+    let escape = keyboard::Key::Named(keyboard::key::Named::Escape);
+    match event {
+        keyboard::Event::KeyPressed { key, .. } if *key == escape => Some(Escape::Swallow),
+        keyboard::Event::KeyReleased { key, .. } if *key == escape => Some(Escape::Cancel),
+        _ => None,
     }
 }
 
@@ -677,6 +697,24 @@ mod tests {
     fn the_size_readout_is_in_physical_pixels() {
         assert_eq!(size_label(rect(0.0, 0.0, 1320.0, 700.0), 1.0), "1320 × 700");
         assert_eq!(size_label(rect(0.0, 0.0, 880.0, 466.7), 1.5), "1320 × 700");
+    }
+
+    fn key(pressed: bool, named: keyboard::key::Named) -> keyboard::Event {
+        let (key, physical_key) = (keyboard::Key::Named(named), keyboard::key::Physical::Code(keyboard::key::Code::Escape));
+        let (location, modifiers) = (keyboard::Location::Standard, keyboard::Modifiers::empty());
+        match pressed {
+            true => keyboard::Event::KeyPressed { key: key.clone(), modified_key: key, physical_key, location, modifiers, text: None, repeat: false },
+            false => keyboard::Event::KeyReleased { key: key.clone(), modified_key: key, physical_key, location, modifiers },
+        }
+    }
+
+    #[test]
+    fn escape_cancels_on_release_so_the_window_below_never_gets_half_of_it() {
+        use keyboard::key::Named;
+        assert_eq!(escape(&key(true, Named::Escape)), Some(Escape::Swallow));
+        assert_eq!(escape(&key(false, Named::Escape)), Some(Escape::Cancel));
+        assert_eq!(escape(&key(true, Named::Enter)), None);
+        assert_eq!(escape(&key(false, Named::Enter)), None);
     }
 
     #[test]
