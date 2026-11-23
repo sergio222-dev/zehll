@@ -30,6 +30,7 @@ mod pomodoro;
 mod popup;
 mod shape;
 mod shortcuts;
+mod snip;
 mod state;
 mod subpanel;
 mod sysmon;
