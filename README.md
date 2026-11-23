@@ -16,6 +16,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - [Emoji picker](docs/emojis.md): a launcher page that searches emojis and types the one you pick, with most used and skin tones.
 - [Screen snip](docs/screen-snip.md) in the style of ii's region selector: freeze the screen, pick a window or drag a zone, copy, save or edit it.
 - [Wallpapers](docs/wallpapers.md) with ii's workspace parallax, launcher pages to pick them with their accent color and to search Wallhaven, and colors from matugen.
+- [Volume indicator](docs/volume-osd.md): shows the volume for a moment when it changes from the keyboard, a headset or an app.
 - One bar per monitor.
 - [Material 3 theme](docs/theme.md) loaded from a matugen-generated file and reloaded live when it changes.
 
@@ -31,6 +32,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 | [Emojis](docs/emojis.md) | The emoji page, its shortcut, keys and skin tones |
 | [Screen snip](docs/screen-snip.md) | The shortcut, picking and dragging zones, copy, save and edit |
 | [Wallpapers](docs/wallpapers.md) | The parallax, the Wallpapers and Wallhaven pages and the accent color |
+| [Volume indicator](docs/volume-osd.md) | When it shows and hides, boost and mute |
 | [Theme](docs/theme.md) | Colors from matugen and the embedded fonts |
 | [System tray](docs/system-tray.md) | How Zehll shares the tray watcher with other shells |
 
@@ -51,6 +53,7 @@ Some features use optional tools; each page lists its own:
 | [Emojis](docs/emojis.md#requirements) | Noto Color Emoji, wtype, wl-copy |
 | [Screen snip](docs/screen-snip.md#requirements) | grim, wl-copy, swappy, xdg-user-dir |
 | [Wallpapers](docs/wallpapers.md#requirements) | matugen, xdg-user-dir, curl |
+| [Volume indicator](docs/volume-osd.md#requirements) | pactl, wpctl |
 | [Theme](docs/theme.md#requirements) | matugen |
 
 ## Build and run

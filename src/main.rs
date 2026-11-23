@@ -28,6 +28,7 @@ mod mixer;
 mod network;
 mod nightlight;
 mod notifications;
+mod osd;
 mod panel;
 mod pomodoro;
 mod popup;
@@ -233,6 +234,8 @@ struct Bar {
     wallpaper_layers: HashMap<String, wallpaper::Layer>,
     // A wallpaper is being scaled; a monitor without its size waits for it instead of asking again.
     wallpaper_preparing: bool,
+    // Volume indicator shown when the output's volume or mute changes.
+    osd: osd::Osd,
 }
 
 struct Popup {
@@ -253,6 +256,7 @@ enum Surface {
     Wallpaper(String),
     MeetingAlerts,
     Popups,
+    Osd,
     // Transparent full-screen layer below the panel; clicking it closes the panel.
     Catcher,
 }
@@ -354,6 +358,7 @@ impl Bar {
             wallpaper_scaled: HashMap::new(),
             wallpaper_layers: HashMap::new(),
             wallpaper_preparing: false,
+            osd: osd::Osd::default(),
         };
         let restore = match state.keep_awake {
             true => Task::perform(idle::inhibit(), Message::KeepAwake),
@@ -424,6 +429,9 @@ enum Message {
     PowerMenu,
     Audio(audio::Audio),
     ToggleMute(&'static str),
+    // Checks whether the volume indicator is due to hide.
+    OsdTick,
+    HideOsd,
     Network(network::Network),
     SetWifi(bool),
     Bluetooth(bluetooth::Bluetooth),
@@ -630,12 +638,15 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         Some(_) => time::every(Duration::from_millis(16)).map(|_| Message::MediaFrame),
         None => Subscription::none(),
     };
+    let osd = match bar.osd.surface {
+        Some(_) => time::every(Duration::from_millis(100)).map(|_| Message::OsdTick),
+        None => Subscription::none(),
+    };
     let panel = match bar.panel {
         Some(_) => Subscription::batch([
             mixer,
             scan_animation,
             keyboard::listen().map(Message::Key),
-            Subscription::run(audio::events).map(Message::Audio),
             Subscription::run(network::events).map(Message::Network),
             Subscription::run(bluetooth::events).map(Message::Bluetooth),
         ]),
@@ -662,6 +673,8 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(bluetooth_agent::serve).map(|never| match never {}),
+        // Always on: the volume indicator follows the output even with the panel closed.
+        Subscription::run(audio::events).map(Message::Audio),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
         window::close_events().map(Message::WindowClosed),
         window::open_events().map(Message::WindowOpened),
@@ -672,7 +685,8 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
         media,
         flare,
         workspace_move,
-            wallpaper_pan,
+        wallpaper_pan,
+        osd,
     ])
 }
 
@@ -842,8 +856,13 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return activate_tray(bar, request).chain(close_tray_menu(bar));
         }
         Message::WindowClosed(id) => {
-            if let Some(Surface::Wallpaper(name)) = bar.surfaces.remove(&id) {
-                bar.wallpaper_layers.remove(&name);
+            match bar.surfaces.remove(&id) {
+                Some(Surface::Wallpaper(name)) => {
+                    bar.wallpaper_layers.remove(&name);
+                }
+                // The reading stays until the surface is gone, so it closes showing it.
+                Some(Surface::Osd) if bar.osd.surface.is_none() => bar.osd.shown = None,
+                _ => {}
             }
             bar.bars.remove(&id);
             // The compositor dismissed it, for example a popup clicked outside.
@@ -855,6 +874,10 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             }
             if bar.alert_surface == Some(id) {
                 bar.alert_surface = None;
+            }
+            if bar.osd.surface == Some(id) {
+                bar.osd.surface = None;
+                bar.osd.shown = None;
             }
             if bar.panel.as_ref().is_some_and(|open| open.panel == id || open.catcher == id) {
                 return close_panel(bar);
@@ -1341,7 +1364,17 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 Err(err) => eprintln!("zehll: cannot restart: {err}"),
             }
         }
-        Message::Audio(audio) => bar.audio = Some(audio),
+        Message::Audio(audio) => {
+            let task = show_osd(bar, &audio.output);
+            bar.audio = Some(audio);
+            return task;
+        }
+        Message::OsdTick => {
+            if bar.osd.shown.as_ref().is_some_and(|(_, hide_at)| Instant::now() >= *hide_at) {
+                return hide_osd(bar);
+            }
+        }
+        Message::HideOsd => return hide_osd(bar),
         Message::ToggleMute(target) => return Task::future(audio::toggle_mute(target)).discard(),
         Message::Network(network) => bar.network = Some(network),
         Message::SetWifi(enabled) => return Task::future(network::set_wifi(enabled)).discard(),
@@ -1608,6 +1641,45 @@ fn sync_alert_cards(bar: &mut Bar) -> Task<Message> {
             bar.surfaces.insert(id, Surface::MeetingAlerts);
             Task::done(Message::NewLayerShell { settings, id })
         }
+    }
+}
+
+/// Shows the volume indicator when the output's volume or mute changed, or keeps it up longer.
+/// Not while the side panel is open: its audio tile already shows the volume.
+fn show_osd(bar: &mut Bar, output: &audio::Device) -> Task<Message> {
+    let changed = osd::changed(bar.osd.last.as_ref(), output);
+    bar.osd.last = Some(output.clone());
+    if !changed || bar.panel.is_some() {
+        return Task::none();
+    }
+    bar.osd.shown = Some((output.clone(), Instant::now() + osd::HOLD));
+    if bar.osd.surface.is_some() {
+        return Task::none();
+    }
+    let Some(output) = hyprland::focused_monitor() else {
+        return Task::none();
+    };
+    let settings = NewLayerShellSettings {
+        size: Some(osd::SIZE),
+        layer: Layer::Overlay,
+        anchor: Anchor::Top,
+        exclusive_zone: Some(0),
+        margin: Some((14, 0, 0, 0)),
+        keyboard_interactivity: KeyboardInteractivity::None,
+        output_option: OutputOption::OutputName(output),
+        events_transparent: false,
+        namespace: Some(String::from(osd::NAMESPACE)),
+    };
+    let id = Id::unique();
+    bar.osd.surface = Some(id);
+    bar.surfaces.insert(id, Surface::Osd);
+    Task::done(Message::NewLayerShell { settings, id })
+}
+
+fn hide_osd(bar: &mut Bar) -> Task<Message> {
+    match bar.osd.surface.take() {
+        Some(id) => Task::done(Message::RemoveWindow(id)),
+        None => Task::none(),
     }
 }
 
@@ -2484,6 +2556,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
+        Some(Surface::Osd) => return osd::view(bar),
         Some(Surface::Catcher) => {
             return mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
                 .on_press(Message::ClosePanel)
