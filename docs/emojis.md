@@ -11,7 +11,7 @@ hl.bind("SUPER + Period", hl.dsp.global("zehll:emojis"), { description = "Utilit
 
 `hl.unbind` also drops ii's fuzzel fallback, so the combo does nothing while Zehll is not running.
 
-With an empty search the grid shows **MOST USED** (the six emojis you picked most, with their counts) and then every Unicode group under its header, six emojis per row. Typing drops the headers and lists the matches, best first, fuzzy matched over each emoji's name and GitHub shortcodes (and, weaker, its group); equal matches go to the one you pick more. The footer shows the selected emoji's name and shortcode.
+With an empty search the grid shows **MOST USED** (the six emojis you picked most, with their counts) and then every Unicode group under its header, six emojis per row. Typing drops the headers and lists the matches, best first, fuzzy matched over each emoji's name and GitHub shortcodes, then (weaker) its keywords from [emojilib](https://github.com/muan/emojilib), the same list ii searches, so `thunder` finds ⚡, and last its group; equal matches go to the one you pick more. The footer shows the selected emoji's name and shortcode.
 
 | Key | Action |
 |---|---|

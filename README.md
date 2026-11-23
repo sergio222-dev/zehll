@@ -70,6 +70,7 @@ Debug builds start noticeably slower because the GPU renderer is unoptimized.
 - [iced_layershell / layershellev](https://github.com/waycrate/exwlshelleventloop): layer-shell integration for iced
 - [system-tray](https://github.com/jakestanger/system-tray): StatusNotifierItem and DBusMenu client
 - [freedesktop-icons](https://github.com/oknozor/freedesktop-icons): icon theme lookup
+- [emojilib](https://github.com/muan/emojilib): emoji search keywords (MIT, see [`assets/emoji/emojilib-LICENSE.txt`](assets/emoji/emojilib-LICENSE.txt))
 - [tokio](https://github.com/tokio-rs/tokio), [chrono](https://github.com/chronotope/chrono), [serde_json](https://github.com/serde-rs/json)
 
 ## How it was made
