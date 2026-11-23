@@ -947,7 +947,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let [program, args @ ..] = subpanel.details() else {
                 return Task::none();
             };
-            if let Err(err) = std::process::Command::new(program).args(args).spawn() {
+            if let Err(err) = system::spawn(program, args) {
                 eprintln!("zehll: cannot start {program}: {err}");
             }
             return close_panel(bar);
@@ -1569,7 +1569,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         }
         Message::WallpaperFrame => {}
         Message::PowerMenu => {
-            if let Err(err) = std::process::Command::new("wlogout").spawn() {
+            if let Err(err) = system::spawn("wlogout", &[]) {
                 eprintln!("zehll: cannot start wlogout: {err}");
             }
             return close_panel(bar);
@@ -1616,7 +1616,7 @@ fn show_alert_cards(bar: &mut Bar, started: Vec<meetings::Meeting>) -> Task<Mess
 
 /// Opens a meeting's Meet link or event page in the browser.
 fn open_link(link: &str) {
-    if let Err(err) = std::process::Command::new("xdg-open").arg(link).spawn() {
+    if let Err(err) = system::spawn("xdg-open", &[link]) {
         eprintln!("zehll: cannot open {link}: {err}");
     }
 }
