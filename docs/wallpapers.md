@@ -8,7 +8,7 @@ Zehll draws the desktop wallpaper itself and recolors the desktop with matugen, 
 
 Each monitor gets a layer below every window (namespace `zehll-wallpaper`) showing the wallpaper zoomed to 107 % of what covers it. Its left edge is shown on the monitor's first workspace and its right edge on the fourth, centered vertically; changing workspace slides it to its new place in 600 ms, easing out, like ii's parallax.
 
-The wallpaper is scaled once per monitor size into `~/.cache/zehll/wallpaper`, so the picture kept in the GPU is no larger than the monitor needs. ii's background layer is drawn above Zehll's, so with Zehll it should be off.
+The wallpaper is scaled once per monitor size into `~/.cache/zehll/wallpaper`, so the picture kept in the GPU is no larger than the monitor needs. The cache keeps the 12 most recently used files (a few wallpapers per monitor) and prunes the rest on its own; the current wallpaper is never pruned. ii's background layer is drawn above Zehll's, so with Zehll it should be off.
 
 The wallpaper and its accent are kept in `~/.local/state/zehll/wallpapers.json`, and the wallpaper comes back when Zehll starts.
 
@@ -23,7 +23,7 @@ hl.bind("CTRL + SUPER + T", hl.dsp.global("zehll:wallpapers"), { description = "
 hl.bind("CTRL + SUPER + ALT + T", hl.dsp.global("zehll:wallpaperRandom"), { description = "Shell: Random wallpaper" })
 ```
 
- The launcher grows to a grid of the images in `$(xdg-user-dir PICTURES)/Wallpapers`, newest first; the search filters them by name. Thumbnails are made in the background and kept in `~/.cache/zehll/thumbs`.
+ The launcher grows to a grid of the images in `$(xdg-user-dir PICTURES)/Wallpapers`, newest first; the search filters them by name. Thumbnails are made in the background and kept in `~/.cache/zehll/thumbs`; those of images no longer in the folder are deleted when the page opens. Closing the launcher stops the ones still being made, and the next opening finishes them.
 
 | Key | Action |
 |---|---|
@@ -47,9 +47,9 @@ The search runs 600 ms after typing stops; scrolling or moving near the end load
 
 - The filter bar toggles the categories (General, Anime, People) and the purity (SFW, Sketchy, NSFW), cycles the sorting (date added, relevance, random, views, favorites, toplist of the last month), flips the order and searches again. At least one category and one purity stay on.
 - Sketchy and NSFW need an API key from your wallhaven account settings. The key button turns the search field into a hidden key field: Enter saves it, an empty field removes it, Shift+Escape cancels.
-- Enter (or a click on the selected result) downloads the full image to `~/.cache/zehll/wallhaven/full` and applies it; Ctrl+Enter downloads it to the wallpaper folder as `wallhaven-<id>.<ext>`, so it stays in the Wallpapers page. A failed thumbnail retries on click.
+- Enter (or a click on the selected result) downloads the full image to `~/.cache/zehll/wallhaven/full` (which keeps the last 3, the current one included) and applies it; Ctrl+Enter downloads it to the wallpaper folder as `wallhaven-<id>.<ext>`, so it stays in the Wallpapers page. A failed thumbnail retries on click.
 
-The filters and the key are kept in `~/.local/state/zehll/wallpapers.json` under `wallhaven`; thumbnails are cached in `~/.cache/zehll/wallhaven/thumbs`.
+The filters and the key are kept in `~/.local/state/zehll/wallpapers.json` under `wallhaven`; thumbnails are cached in `~/.cache/zehll/wallhaven/thumbs`, up to the 300 most recently shown. A new search or closing the launcher stops the pending thumbnail downloads; downloads are capped at 5 MB per thumbnail and 100 MB per wallpaper.
 
 ## Requirements
 
