@@ -533,6 +533,9 @@ enum Message {
     // A tile, by its position among the tiles shown: selects it, or applies it when selected.
     GalleryClick(usize),
     GalleryScroll(i32),
+    /// A click on the emoji at this index of the shown ones: picks it.
+    EmojiClick(usize),
+    EmojiScroll(i32),
     GalleryAccent(usize),
     OpenWallpaperFolder,
     // Opens the launcher on a page, or closes it when it is open there.
@@ -652,6 +655,7 @@ fn subscription(bar: &Bar) -> Subscription<Message> {
             shortcuts::Shortcut::Wallpapers => Message::ToggleLauncherPage(launcher::Page::Wallpapers),
             shortcuts::Shortcut::WallpaperRandom => Message::RandomWallpaper,
             shortcuts::Shortcut::Wallhaven => Message::ToggleLauncherPage(launcher::Page::Wallhaven),
+            shortcuts::Shortcut::Emojis => Message::ToggleLauncherPage(launcher::Page::Emojis),
         }),
         Subscription::run(notifications::events).map(Message::Notifications),
         Subscription::run(mpris::events).map(Message::MediaPlayer),
@@ -1060,6 +1064,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
         Message::CalcAnswer(query, answer) => bar.launcher.set_answer(query, answer),
         Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Wallpapers => return gallery_nav(bar, nav),
         Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Wallhaven => return wallhaven_nav(bar, nav),
+        Message::LauncherNav(nav) if bar.launcher.page() == launcher::Page::Emojis => return emoji_nav(bar, nav),
         Message::LauncherNav(nav) => {
             let len = launcher::items(&bar.launcher).len();
             match nav {
@@ -1108,6 +1113,8 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             return gallery_colors(bar);
         }
         Message::GalleryScroll(rows) => bar.launcher.gallery_scroll(rows),
+        Message::EmojiClick(index) => return pick_emoji(bar, index, false),
+        Message::EmojiScroll(rows) => bar.launcher.emoji_scroll(rows),
         Message::GalleryAccent(index) => bar.launcher.gallery.accent = index,
         Message::WallhavenKey => {
             let browser = &mut bar.launcher.wallhaven;
@@ -1951,6 +1958,7 @@ fn open_launcher(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
     bar.launcher.reset();
     bar.launcher.now = Local::now().timestamp();
     bar.launcher.running = hyprland::clients().into_iter().map(|(_, class)| class).collect();
+    bar.launcher.previous_window = hyprland::active_address();
     // A page opened by a shortcut sizes the surface from the start.
     let page_task = match page {
         launcher::Page::Home => Task::none(),
@@ -2138,6 +2146,47 @@ fn gallery_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
         launcher::Nav::Pick(_) => return Task::none(),
     }
     gallery_colors(bar)
+}
+
+/// Keys on the Emojis page: arrows move in the grid, Alt+Left/Right change the skin tone,
+/// Enter types the emoji and Ctrl+Enter copies it.
+fn emoji_nav(bar: &mut Bar, nav: launcher::Nav) -> Task<Message> {
+    match nav {
+        launcher::Nav::Close => return close_launcher(bar),
+        launcher::Nav::Back => {
+            if !bar.launcher.back() {
+                return close_launcher(bar);
+            }
+            return Task::batch([resize_launcher(bar), focus_launcher()]);
+        }
+        launcher::Nav::Move(rows) => bar.launcher.emoji_vertical(rows),
+        launcher::Nav::Sideways(delta) => bar.launcher.emoji_sideways(delta),
+        launcher::Nav::Accent(delta) => {
+            bar.launcher.emoji.tone = emoji::cycle_tone(bar.launcher.emoji.tone, delta);
+            bar.launcher.emoji.save();
+        }
+        launcher::Nav::Activate { secondary } => return pick_emoji(bar, bar.launcher.selected, secondary),
+        launcher::Nav::Pick(_) | launcher::Nav::Random => {}
+    }
+    focus_launcher()
+}
+
+/// Counts a pick of the emoji at `index`; Enter closes the launcher and types it into the window
+/// below (and copies it), Ctrl+Enter only copies it. MOST USED is laid out again on the next
+/// opening or search, so the grid doesn't shift under the selection.
+fn pick_emoji(bar: &mut Bar, index: usize, copy_only: bool) -> Task<Message> {
+    let (Some(text), Some(base)) = (bar.launcher.emoji.text(index), bar.launcher.emoji.shown.get(index).copied()) else {
+        return focus_launcher();
+    };
+    emoji::bump(&mut bar.launcher.emoji.counts, base);
+    bar.launcher.emoji.save();
+    match copy_only {
+        true => Task::batch([Task::future(clipboard::copy(text.to_owned())).discard(), focus_launcher()]),
+        false => {
+            let window = bar.launcher.previous_window.clone();
+            Task::batch([close_launcher(bar), Task::future(emoji::paste(text.to_owned(), window)).discard()])
+        }
+    }
 }
 
 /// Keys on the Wallhaven page: like the Wallpapers grid, Ctrl+Enter also keeps the download in

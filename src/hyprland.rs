@@ -88,6 +88,11 @@ fn lua_string(text: &str) -> String {
     literal
 }
 
+/// Address of the focused window, if any.
+pub fn active_address() -> Option<String> {
+    request("j/activewindow")?["address"].as_str().filter(|address| !address.is_empty()).map(str::to_owned)
+}
+
 /// Queries the currently focused window.
 pub fn active_window() -> Option<ActiveWindow> {
     let json = request("j/activewindow")?;
