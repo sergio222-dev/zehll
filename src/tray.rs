@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use iced::futures::{SinkExt, Stream};
 use iced::stream;
@@ -102,6 +102,12 @@ pub fn events() -> impl Stream<Item = TrayEvent> {
     })
 }
 
+/// The GTK icon theme, read once: `default_theme_gtk` runs `gsettings` on every call.
+fn icon_theme() -> &'static str {
+    static THEME: OnceLock<String> = OnceLock::new();
+    THEME.get_or_init(|| freedesktop_icons::default_theme_gtk().unwrap_or_else(|| String::from("hicolor")))
+}
+
 fn find_icon(name: &str, theme_path: Option<&str>) -> Option<PathBuf> {
     if Path::new(name).is_absolute() {
         return Some(PathBuf::from(name));
@@ -115,9 +121,8 @@ fn find_icon(name: &str, theme_path: Option<&str>) -> Option<PathBuf> {
             }
         }
     }
-    let theme = freedesktop_icons::default_theme_gtk().unwrap_or_else(|| String::from("hicolor"));
     freedesktop_icons::lookup(name)
-        .with_theme(&theme)
+        .with_theme(icon_theme())
         .with_size(ICON_SIZE * 2)
         .with_cache()
         .find()
