@@ -11,6 +11,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 - [System tray](docs/system-tray.md) (StatusNotifierItem): icons, left/middle click activation and right-click context menus (DBusMenu) with submenus and toggles.
 - [Side panel](docs/side-panel.md) with uptime, reload and power actions, quick settings, [notifications](docs/notifications.md), a month calendar and a to-do list shared with ii (`~/.local/state/quickshell/user/todo.json`) and a pomodoro timer (25/5 min, a 15 min break every 4 cycles) that notifies when each phase ends.
 - [Google Calendar meetings](docs/meetings.md): the next meeting beside the clock, a calendar popover with each day's agenda, and alerts when a meeting is about to start.
+- [Agent indicator](docs/agents.md): one logo per live Claude Code or Copilot CLI session right of the meetings pill, colored by what the session is doing.
 - [Media player](docs/media-player.md) (MPRIS): a play/pause button left of the date opens a player popover, with cover art, seek bar, previous/next, shuffle and repeat.
 - [App launcher](docs/launcher.md): fuzzy search over apps, session commands, files, clipboard history, Hyprland keybindings and a calculator.
 - [Emoji picker](docs/emojis.md): a launcher page that searches emojis and types the one you pick, with most used and skin tones.
@@ -27,6 +28,7 @@ Zehll is inspired by the `ii` (illogical-impulse) shell from [end-4/dots-hyprlan
 | [Side panel](docs/side-panel.md) | Opening it, quick settings and their sub-panels, night light, keep awake |
 | [Notifications](docs/notifications.md) | The notification daemon, popups and the list in the side panel |
 | [Meetings](docs/meetings.md) | Google Calendar sign-in, the pill, the calendar popover and the alerts |
+| [Agent indicator](docs/agents.md) | The ai_alert hooks it reads, the colors and the tooltip |
 | [Media player](docs/media-player.md) | The media button, its popover and live streams |
 | [Launcher](docs/launcher.md) | The shortcut, keys and every page |
 | [Emojis](docs/emojis.md) | The emoji page, its shortcut, keys and skin tones |
@@ -48,6 +50,7 @@ Some features use optional tools; each page lists its own:
 |---|---|
 | [Side panel](docs/side-panel.md#requirements) | wlogout, hyprsunset, ddcutil |
 | [Meetings](docs/meetings.md#requirements) | python3, a Google OAuth client, pw-play, xdg-open |
+| [Agent indicator](docs/agents.md#requirements) | ai_alert's hooks |
 | [Media player](docs/media-player.md#requirements) | curl, cava |
 | [Launcher](docs/launcher.md#requirements) | qalc, fd, zoxide, file, xdg-open, cliphist, wl-copy |
 | [Emojis](docs/emojis.md#requirements) | Noto Color Emoji, wtype, wl-copy |

@@ -1,4 +1,5 @@
 mod agenda;
+mod agents;
 mod alert;
 mod apps;
 mod audio;
@@ -202,6 +203,8 @@ struct Bar {
     // SSID asking for a password in the Wi-Fi sub-panel.
     wifi_prompt: Option<String>,
     wifi_password: String,
+    // Live Claude Code / Copilot CLI sessions, from ai_alert's state file.
+    agents: Vec<agents::Session>,
     meetings: Vec<meetings::Meeting>,
     meetings_status: meetings::Status,
     // `gcal.py auth` is waiting for the browser sign-in.
@@ -281,6 +284,8 @@ enum Tooltip {
     Meeting,
     Media,
     System,
+    // The agent session at this index of `Bar::agents`.
+    Agent(usize),
 }
 
 struct OpenMenu {
@@ -345,6 +350,7 @@ impl Bar {
             wifi: None,
             wifi_prompt: None,
             wifi_password: String::new(),
+            agents: agents::load().unwrap_or_default(),
             meetings: Vec::new(),
             meetings_status: meetings::Status::Ok,
             meetings_signing_in: false,
@@ -726,6 +732,17 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 tasks.push(Task::done(Message::HideTooltip));
             }
             tasks.extend(meeting_alerts(bar));
+            // The hooks only touch the file on agent events, so a 1 s poll costs one small read.
+            if let Some(sessions) = agents::load() {
+                bar.agents = sessions;
+            }
+            // A session can end under the pointer, without a pointer exit.
+            let agent_tooltip = bar.tooltip.and_then(|id| bar.surfaces.get(&id));
+            if let Some(Surface::Tooltip(Tooltip::Agent(index))) = agent_tooltip
+                && *index >= bar.agents.len()
+            {
+                tasks.push(Task::done(Message::HideTooltip));
+            }
             if let Some(finished) = bar.pomodoro.tick(Duration::from_secs(1)) {
                 tasks.push(pomodoro_finished(finished));
             }
@@ -768,6 +785,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
                 Tooltip::Meeting => MEETING_TOOLTIP_SIZE,
                 Tooltip::Media => media::TOOLTIP_SIZE,
                 Tooltip::System => sysmon::TOOLTIP_SIZE,
+                Tooltip::Agent(_) => agents::TOOLTIP_SIZE,
             };
             // The clock sits right of the centered workspaces, so the tooltips hang under the
             // pointer, like the tray menus, instead of under the bar's center.
@@ -2602,6 +2620,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
             };
         }
         Some(Surface::Tooltip(Tooltip::Media)) => return media::tooltip(bar),
+        Some(Surface::Tooltip(Tooltip::Agent(index))) => return agents::tooltip(bar, *index),
         Some(Surface::MeetingAlerts) => return alert::view(bar),
         Some(Surface::Popups) => return popup::view(bar),
         Some(Surface::Osd) => return osd::view(bar),
@@ -2655,7 +2674,7 @@ fn view(bar: &Bar, id: Id) -> Element<'_, Message> {
                 container(Row::new().push(sysmon::bar_button(bar)).push(media::bar_button(bar)).spacing(6).align_y(Alignment::Center))
                     .align_right(Length::Fill),
                 workspace_indicator(bar, id),
-                container(Row::new().push(clock).push(meeting_pill(bar)).spacing(6).align_y(Alignment::Center))
+                container(Row::new().push(clock).push(meeting_pill(bar)).push(agents::bar_button(bar)).spacing(6).align_y(Alignment::Center))
                     .align_left(Length::Fill),
             ]
             .spacing(6)
