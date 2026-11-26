@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use iced::futures::{SinkExt, Stream};
 use iced::stream;
@@ -13,6 +14,8 @@ const SERVICE: &str = "org.bluez";
 const ADAPTER: &str = "org.bluez.Adapter1";
 const DEVICE: &str = "org.bluez.Device1";
 const BATTERY: &str = "org.bluez.Battery1";
+/// How long a device whose bond went stale has to show up again (in pairing mode) to be re-paired.
+const REDISCOVER: Duration = Duration::from_secs(30);
 
 type ManagedObjects = HashMap<OwnedObjectPath, HashMap<String, HashMap<String, OwnedValue>>>;
 
@@ -82,17 +85,14 @@ pub async fn run(action: DeviceAction) {
     let result = async {
         let connection = Connection::system().await?;
         match &action {
-            DeviceAction::Connect(path) => dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?.call_method("Connect", &()).await.map(drop),
-            // Like ii and blueman: pair, trust (so the device's profiles connect without asking), connect.
-            DeviceAction::Pair(path) => {
-                let device = dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?;
-                let pairing = bluetooth_agent::pairing(path.as_str());
-                device.call_method("Pair", &()).await?;
-                device.set_property("Trusted", true).await?;
-                let connected = device.call_method("Connect", &()).await.map(drop);
-                drop(pairing);
-                connected
-            }
+            DeviceAction::Connect(path) => match dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?.call_method("Connect", &()).await {
+                Err(zbus::Error::MethodError(_, Some(reason), _)) if is_key_missing(&reason) => {
+                    eprintln!("zehll: Bluetooth {} lost its pairing key; pairing again", path.as_str());
+                    repair(&connection, path).await
+                }
+                result => result.map(drop),
+            },
+            DeviceAction::Pair(path) => pair(&connection, path).await,
             DeviceAction::Disconnect(path) => dbus::proxy(&connection, SERVICE, path.as_str(), DEVICE).await?.call_method("Disconnect", &()).await.map(drop),
             DeviceAction::Forget { adapter, device } => {
                 dbus::proxy(&connection, SERVICE, adapter.as_str(), ADAPTER).await?.call_method("RemoveDevice", &(device,)).await.map(drop)
@@ -105,6 +105,57 @@ pub async fn run(action: DeviceAction) {
     if let Err(err) = result.await {
         eprintln!("zehll: Bluetooth {action:?} failed: {err}");
     }
+}
+
+/// Like ii and blueman: pair, trust (so the device's profiles connect without asking), connect.
+async fn pair(connection: &Connection, path: &OwnedObjectPath) -> zbus::Result<()> {
+    let device = dbus::proxy(connection, SERVICE, path.as_str(), DEVICE).await?;
+    let pairing = bluetooth_agent::pairing(path.as_str());
+    device.call_method("Pair", &()).await?;
+    device.set_property("Trusted", true).await?;
+    let connected = device.call_method("Connect", &()).await.map(drop);
+    drop(pairing);
+    connected
+}
+
+/// The device paired with another host and dropped this computer's link key, so BlueZ's bond is
+/// stale: forget it, wait for the device to show up again in a scan (it must be in pairing mode)
+/// and pair it from scratch.
+async fn repair(connection: &Connection, path: &OwnedObjectPath) -> zbus::Result<()> {
+    let adapter = dbus::proxy(connection, SERVICE, adapter_of(path.as_str()), ADAPTER).await?;
+    let mut signals = dbus::signals(connection, SERVICE).await?;
+    adapter.call_method("RemoveDevice", &(path,)).await?;
+    // Discovery belongs to this connection; another client's (the sub-panel's) is unaffected.
+    adapter.call_method("StartDiscovery", &()).await?;
+    let found = tokio::time::timeout(REDISCOVER, async {
+        while !has_device(connection, path).await {
+            if !dbus::next_change(&mut signals).await {
+                return false;
+            }
+        }
+        true
+    })
+    .await
+    .unwrap_or(false);
+    let _ = adapter.call_method("StopDiscovery", &()).await;
+    if !found {
+        return Err(zbus::Error::Failure(format!("{} did not show up again; put it in pairing mode and press PAIR", path.as_str())));
+    }
+    pair(connection, path).await
+}
+
+async fn has_device(connection: &Connection, path: &OwnedObjectPath) -> bool {
+    managed_objects(connection).await.is_some_and(|objects| objects.get(path).is_some_and(|interfaces| interfaces.contains_key(DEVICE)))
+}
+
+/// BlueZ's reason when the device no longer has this computer's link key (BR/EDR or LE).
+fn is_key_missing(reason: &str) -> bool {
+    matches!(reason, "br-connection-key-missing" | "le-connection-key-missing")
+}
+
+/// The adapter a device object hangs from: `/org/bluez/hci0/dev_X` is on `/org/bluez/hci0`.
+fn adapter_of(device: &str) -> &str {
+    device.rsplit_once('/').map_or(device, |(adapter, _)| adapter)
 }
 
 impl Bluetooth {
@@ -185,6 +236,10 @@ pub async fn set_powered(adapter: OwnedObjectPath, powered: bool) {
 }
 
 async fn read(connection: &Connection) -> Option<Bluetooth> {
+    summarize(&managed_objects(connection).await?)
+}
+
+async fn managed_objects(connection: &Connection) -> Option<ManagedObjects> {
     let manager = ObjectManagerProxy::builder(connection)
         .destination(SERVICE)
         .ok()?
@@ -195,11 +250,12 @@ async fn read(connection: &Connection) -> Option<Bluetooth> {
         .await
         .ok()?;
     let objects = manager.get_managed_objects().await.ok()?;
-    let objects = objects
-        .into_iter()
-        .map(|(path, interfaces)| (path, interfaces.into_iter().map(|(name, properties)| (name.to_string(), properties)).collect()))
-        .collect();
-    summarize(&objects)
+    Some(
+        objects
+            .into_iter()
+            .map(|(path, interfaces)| (path, interfaces.into_iter().map(|(name, properties)| (name.to_string(), properties)).collect()))
+            .collect(),
+    )
 }
 
 /// Summarizes BlueZ's managed objects: the first adapter and a connected device.
@@ -229,6 +285,21 @@ mod tests {
 
     fn path(path: &str) -> OwnedObjectPath {
         OwnedObjectPath::try_from(path).unwrap()
+    }
+
+    #[test]
+    fn detects_a_missing_link_key() {
+        // Seen in zehll.log when the headset had paired with another host.
+        assert!(is_key_missing("br-connection-key-missing"));
+        assert!(is_key_missing("le-connection-key-missing"));
+        assert!(!is_key_missing("br-connection-page-timeout"));
+        assert!(!is_key_missing("br-connection-busy"));
+    }
+
+    #[test]
+    fn finds_the_adapter_of_a_device() {
+        assert_eq!(adapter_of("/org/bluez/hci0/dev_C0_EA_C3_18_57_B8"), "/org/bluez/hci0");
+        assert_eq!(adapter_of("/org/bluez/hci1/dev_4C_72_74_8F_CB_84"), "/org/bluez/hci1");
     }
 
     #[test]
