@@ -60,11 +60,11 @@ use iced::font::{Style as FontStyle, Weight};
 use iced::widget::{Column, Row, Space, Stack, button, canvas, column, container, image, mouse_area, row, svg, text};
 use iced::window::Id;
 use iced::{Alignment, Border, Color, Element, Font, Length, Padding, Shadow, Subscription, Task, keyboard, time, window};
-use iced_layershell::actions::IcedNewPopupSettings;
-use iced_layershell::daemon;
-use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption, PopupAnchor, PopupGravity};
-use iced_layershell::settings::{LayerShellSettings, Settings, StartMode};
-use iced_layershell::to_layer_message;
+use iced_exwlshell::actions::IcedNewPopupSettings;
+use iced_exwlshell::daemon;
+use iced_exwlshell::reexport::{Anchor, Extent, KeyboardInteractivity, Layer, LayerSize, Margin, NewLayerShellSettings, OutputOption, PixelSize, PopupAnchor, PopupGravity, Position};
+use iced_exwlshell::settings::{LayerShellSettings, StartMode};
+use iced_exwlshell::to_layer_message;
 use system_tray::client::{ActivateRequest, Client, Event as TrayEvent, UpdateEvent};
 use system_tray::menu::{MenuType, ToggleState, ToggleType};
 
@@ -118,14 +118,14 @@ const TOOLTIP_LIST_PADDING: (u16, u16) = (8, 14);
 const MEETING_TOOLTIP_SIZE: (u32, u32) = (360, 64);
 const MEETING_TIME: Color = Color::from_rgb8(0xc9, 0xd2, 0xe8);
 
-pub fn main() -> Result<(), iced_layershell::Error> {
+pub fn main() -> Result<(), iced_exwlshell::Error> {
     daemon(Bar::new, namespace, update, view)
         .style(style)
         .subscription(subscription)
-        .settings(Settings {
-            // No surface at start: Zehll opens one bar per Hyprland monitor (see `bar_settings`),
-            // since an `AllScreens` surface does not say which monitor it is on.
-            layer_settings: LayerShellSettings { start_mode: StartMode::Background, ..Default::default() },
+        // No surface at start: Zehll opens one bar per Hyprland monitor (see `bar_settings`),
+        // since an `AllScreens` surface does not say which monitor it is on.
+        .layer_settings(LayerShellSettings { start_mode: StartMode::Background, ..Default::default() })
+        .settings(iced::Settings {
             fonts: vec![
                 Cow::Borrowed(include_bytes!("../assets/fonts/Barlow-Regular.ttf").as_slice()),
                 Cow::Borrowed(include_bytes!("../assets/fonts/Barlow-Medium.ttf").as_slice()),
@@ -792,15 +792,16 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             let cursor = hyprland::cursor_x_on_focused_monitor().unwrap_or_default();
             let width = hyprland::focused_monitor_width().unwrap_or(size.0 as i32);
             let settings = NewLayerShellSettings {
-                size: Some(size),
+                size: layer_size(size),
                 layer: Layer::Overlay,
                 anchor: Anchor::Top | Anchor::Left,
                 exclusive_zone: Some(0),
-                margin: Some((8, 0, 0, hang_under(cursor, size.0 as i32, width))),
+                margin: Some(margin(8, 0, 0, hang_under(cursor, size.0 as i32, width))),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::OutputName(output),
                 events_transparent: true,
                 namespace: Some(String::from("zehll-tooltip")),
+                blur_option: Default::default(),
             };
 
             let id = Id::unique();
@@ -861,7 +862,12 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             // The cursor is queried only on click instead of tracking every pointer motion.
             let x = hyprland::cursor_x_on_focused_monitor().unwrap_or_default();
             let anchor = (x, 0, 1, BAR_HEIGHT as i32);
-            let mut settings = IcedNewPopupSettings::new(parent, (width, height + menu::GAP as u32), anchor);
+            let mut settings = IcedNewPopupSettings::new(
+                parent,
+                PixelSize::px(width, height + menu::GAP as u32),
+                Position::new(anchor.0, anchor.1),
+                PixelSize::px(anchor.2 as u32, anchor.3 as u32),
+            );
             settings.anchor = PopupAnchor::Bottom;
             settings.gravity = PopupGravity::Bottom;
             let id = Id::unique();
@@ -881,7 +887,7 @@ fn update(bar: &mut Bar, message: Message) -> Task<Message> {
             if let Some(Surface::TrayMenu(open)) = bar.surfaces.get_mut(&id) {
                 open.path = path;
             }
-            return Task::done(Message::SizeChange { id, size: (size.0, size.1 + menu::GAP as u32) });
+            return Task::done(Message::LayoutChange { id, anchor: Anchor::empty(), size: layer_size((size.0, size.1 + menu::GAP as u32)) });
         }
         Message::ActivateTrayMenuItem(submenu_id) => {
             let Some((_, open)) = bar.open_menu() else {
@@ -1671,22 +1677,23 @@ fn sync_alert_cards(bar: &mut Bar) -> Task<Message> {
             bar.alert_surface = None;
             Task::done(Message::RemoveWindow(id))
         }
-        (Some(id), height) => Task::done(Message::SizeChange { id, size: (alert::WIDTH, height) }),
+        (Some(id), height) => Task::done(Message::LayoutChange { id, anchor: Anchor::Top, size: layer_size((alert::WIDTH, height)) }),
         (None, 0) => Task::none(),
         (None, height) => {
             let Some(output) = hyprland::focused_monitor() else {
                 return Task::none();
             };
             let settings = NewLayerShellSettings {
-                size: Some((alert::WIDTH, height)),
+                size: layer_size((alert::WIDTH, height)),
                 layer: Layer::Overlay,
                 anchor: Anchor::Top,
                 exclusive_zone: Some(0),
-                margin: Some((14, 0, 0, 0)),
+                margin: Some(margin(14, 0, 0, 0)),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::OutputName(output),
                 events_transparent: false,
                 namespace: Some(String::from("zehll-meeting-alerts")),
+                blur_option: Default::default(),
             };
             let id = Id::unique();
             bar.alert_surface = Some(id);
@@ -1712,15 +1719,16 @@ fn show_osd(bar: &mut Bar, output: &audio::Device) -> Task<Message> {
         return Task::none();
     };
     let settings = NewLayerShellSettings {
-        size: Some(osd::SIZE),
+        size: layer_size(osd::SIZE),
         layer: Layer::Overlay,
         anchor: Anchor::Top,
         exclusive_zone: Some(0),
-        margin: Some((14, 0, 0, 0)),
+        margin: Some(margin(14, 0, 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::None,
         output_option: OutputOption::OutputName(output),
         events_transparent: false,
         namespace: Some(String::from(osd::NAMESPACE)),
+        blur_option: Default::default(),
     };
     let id = Id::unique();
     bar.osd.surface = Some(id);
@@ -1777,22 +1785,23 @@ fn sync_popups(bar: &mut Bar) -> Task<Message> {
             bar.popup_surface = None;
             Task::done(Message::RemoveWindow(id))
         }
-        (Some(id), height) => Task::done(Message::SizeChange { id, size: (popup::WIDTH, height) }),
+        (Some(id), height) => Task::done(Message::LayoutChange { id, anchor: Anchor::Top | Anchor::Right, size: layer_size((popup::WIDTH, height)) }),
         (None, 0) => Task::none(),
         (None, height) => {
             let Some(output) = hyprland::focused_monitor() else {
                 return Task::none();
             };
             let settings = NewLayerShellSettings {
-                size: Some((popup::WIDTH, height)),
+                size: layer_size((popup::WIDTH, height)),
                 layer: Layer::Overlay,
                 anchor: Anchor::Top | Anchor::Right,
                 exclusive_zone: Some(0),
-                margin: Some((8, 12, 0, 0)),
+                margin: Some(margin(8, 12, 0, 0)),
                 keyboard_interactivity: KeyboardInteractivity::None,
                 output_option: OutputOption::OutputName(output),
                 events_transparent: false,
                 namespace: Some(String::from("zehll-popups")),
+                blur_option: Default::default(),
             };
             let id = Id::unique();
             bar.popup_surface = Some(id);
@@ -1834,7 +1843,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
 
     let catcher = catcher_settings(output.clone(), "zehll-panel-catcher");
     let panel = NewLayerShellSettings {
-        size: Some((panel::WIDTH, 0)),
+        size: layer_size((panel::WIDTH, 0)),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Bottom | Anchor::Right,
         exclusive_zone: Some(0),
@@ -1843,6 +1852,7 @@ fn open_panel(bar: &mut Bar) -> Task<Message> {
         output_option: OutputOption::OutputName(output),
         events_transparent: false,
         namespace: Some(String::from("zehll-panel")),
+        blur_option: Default::default(),
     };
     let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
     bar.surfaces.insert(open.catcher, Surface::Catcher);
@@ -1935,9 +1945,21 @@ fn open_wallpaper(bar: &mut Bar, name: String) -> Task<Message> {
     Task::done(Message::NewLayerShell { settings: wallpaper::layer_settings(name), id })
 }
 
+/// A layer size where 0 leaves that side to the compositor (the surface must be anchored to
+/// both of its edges), as iced_layershell's `(width, height)` tuples did.
+fn layer_size((width, height): (u32, u32)) -> LayerSize {
+    let extent = |pixels| if pixels == 0 { Extent::Fill } else { Extent::px(pixels) };
+    LayerSize { width: extent(width), height: extent(height) }
+}
+
+/// Layer margins in iced_layershell's old tuple order: top, right, bottom, left.
+fn margin(top: i32, right: i32, bottom: i32, left: i32) -> Margin {
+    Margin { top, right, bottom, left }
+}
+
 fn bar_settings(output: String) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((0, BAR_HEIGHT)),
+        size: layer_size((0, BAR_HEIGHT)),
         layer: Layer::Top,
         anchor: Anchor::Top | Anchor::Left | Anchor::Right,
         exclusive_zone: Some(BAR_HEIGHT as i32),
@@ -1946,12 +1968,13 @@ fn bar_settings(output: String) -> NewLayerShellSettings {
         output_option: OutputOption::OutputName(output),
         events_transparent: false,
         namespace: Some(namespace()),
+        blur_option: Default::default(),
     }
 }
 
 fn catcher_settings(output: String, namespace: &str) -> NewLayerShellSettings {
     NewLayerShellSettings {
-        size: Some((0, 0)),
+        size: layer_size((0, 0)),
         layer: Layer::Overlay,
         anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
         exclusive_zone: Some(-1),
@@ -1960,6 +1983,7 @@ fn catcher_settings(output: String, namespace: &str) -> NewLayerShellSettings {
         output_option: OutputOption::OutputName(output),
         events_transparent: false,
         namespace: Some(String::from(namespace)),
+        blur_option: Default::default(),
     }
 }
 
@@ -1979,16 +2003,17 @@ fn open_calendar(bar: &mut Bar) -> Task<Message> {
         }
     };
     let popover = NewLayerShellSettings {
-        size: Some((agenda::WIDTH, agenda::HEIGHT)),
+        size: layer_size((agenda::WIDTH, agenda::HEIGHT)),
         layer: Layer::Overlay,
         // Anchored only to the top, so it is centered under the clock.
         anchor: Anchor::Top,
         exclusive_zone: Some(0),
-        margin: Some((14, 0, 0, 0)),
+        margin: Some(margin(14, 0, 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::OutputName(output.clone()),
         events_transparent: false,
         namespace: Some(String::from("zehll-calendar")),
+        blur_option: Default::default(),
     };
     let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
     bar.surfaces.insert(open.catcher, Surface::Catcher);
@@ -2008,16 +2033,17 @@ fn open_media(bar: &mut Bar) -> Task<Message> {
         return Task::none();
     };
     let popover = NewLayerShellSettings {
-        size: Some((media::WIDTH, media::HEIGHT)),
+        size: layer_size((media::WIDTH, media::HEIGHT)),
         layer: Layer::Overlay,
         // Anchored only to the top, so it is centered under the media button and the clock.
         anchor: Anchor::Top,
         exclusive_zone: Some(0),
-        margin: Some((14, 0, 0, 0)),
+        margin: Some(margin(14, 0, 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::OutputName(output.clone()),
         events_transparent: false,
         namespace: Some(String::from("zehll-media")),
+        blur_option: Default::default(),
     };
     let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
     bar.surfaces.insert(open.catcher, Surface::Catcher);
@@ -2037,16 +2063,17 @@ fn open_system(bar: &mut Bar) -> Task<Message> {
         return Task::none();
     };
     let popover = NewLayerShellSettings {
-        size: Some((sysmon::WIDTH, sysmon::HEIGHT)),
+        size: layer_size((sysmon::WIDTH, sysmon::HEIGHT)),
         layer: Layer::Overlay,
         // Anchored only to the top, so it is centered under the bar like the player.
         anchor: Anchor::Top,
         exclusive_zone: Some(0),
-        margin: Some((14, 0, 0, 0)),
+        margin: Some(margin(14, 0, 0, 0)),
         keyboard_interactivity: KeyboardInteractivity::OnDemand,
         output_option: OutputOption::OutputName(output.clone()),
         events_transparent: false,
         namespace: Some(String::from("zehll-system")),
+        blur_option: Default::default(),
     };
     let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
     bar.surfaces.insert(open.catcher, Surface::Catcher);
@@ -2093,7 +2120,7 @@ fn open_launcher(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
         page => enter_page(bar, page),
     };
     let surface = NewLayerShellSettings {
-        size: Some(launcher::size(page)),
+        size: layer_size(launcher::size(page)),
         layer: Layer::Overlay,
         // No anchor centers it on the output.
         anchor: Anchor::empty(),
@@ -2103,6 +2130,7 @@ fn open_launcher(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
         output_option: OutputOption::OutputName(output.clone()),
         events_transparent: false,
         namespace: Some(String::from("zehll-launcher")),
+        blur_option: Default::default(),
     };
     let open = OpenPanel { panel: Id::unique(), catcher: Id::unique() };
     bar.surfaces.insert(open.catcher, Surface::Catcher);
@@ -2156,7 +2184,7 @@ fn open_snip(bar: &mut Bar, shots: Vec<snip::Shot>) -> Task<Message> {
     }
     let tasks = shots.into_iter().map(|shot| {
         let settings = NewLayerShellSettings {
-            size: Some((0, 0)),
+            size: layer_size((0, 0)),
             layer: Layer::Overlay,
             anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
             exclusive_zone: Some(-1),
@@ -2168,6 +2196,7 @@ fn open_snip(bar: &mut Bar, shots: Vec<snip::Shot>) -> Task<Message> {
             output_option: OutputOption::OutputName(shot.monitor.name.clone()),
             events_transparent: false,
             namespace: Some(String::from("zehll-snip")),
+            blur_option: Default::default(),
         };
         let id = Id::unique();
         bar.surfaces.insert(id, Surface::Snip);
@@ -2237,7 +2266,7 @@ fn enter_page(bar: &mut Bar, page: launcher::Page) -> Task<Message> {
 /// Fits the launcher's surface to its page: the Wallpapers grid is larger.
 fn resize_launcher(bar: &Bar) -> Task<Message> {
     match &bar.launcher_surface {
-        Some(open) => Task::done(Message::SizeChange { id: open.panel, size: launcher::size(bar.launcher.page()) }),
+        Some(open) => Task::done(Message::LayoutChange { id: open.panel, anchor: Anchor::empty(), size: layer_size(launcher::size(bar.launcher.page())) }),
         None => Task::none(),
     }
 }
@@ -3018,6 +3047,19 @@ fn style(bar: &Bar, _: &iced::Theme) -> iced::theme::Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layer_sizes_leave_zero_sides_to_the_compositor() {
+        assert_eq!(layer_size((0, 0)), LayerSize::FILL);
+        assert_eq!(layer_size((0, 44)), LayerSize::fill_width(44));
+        assert_eq!(layer_size((420, 0)), LayerSize::fill_height(420));
+        assert_eq!(layer_size((360, 64)), LayerSize::px(360, 64));
+    }
+
+    #[test]
+    fn margins_keep_the_old_tuple_order() {
+        assert_eq!(margin(8, 12, 0, 3), Margin { top: 8, right: 12, bottom: 0, left: 3 });
+    }
 
     #[test]
     fn mono_widths_cover_whole_characters() {
