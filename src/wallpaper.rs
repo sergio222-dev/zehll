@@ -160,10 +160,10 @@ impl Layer {
 }
 
 /// The layer's surface: the whole monitor, below every window, without input or keyboard.
-pub fn layer_settings(output: String) -> iced_layershell::reexport::NewLayerShellSettings {
-    use iced_layershell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption};
+pub fn layer_settings(output: String) -> iced_exwlshell::reexport::NewLayerShellSettings {
+    use iced_exwlshell::reexport::{Anchor, KeyboardInteractivity, Layer, NewLayerShellSettings, OutputOption};
     NewLayerShellSettings {
-        size: Some((0, 0)),
+        size: iced_exwlshell::reexport::LayerSize::FILL,
         layer: Layer::Background,
         anchor: Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right,
         // Covers the whole output, bars included.
@@ -173,6 +173,7 @@ pub fn layer_settings(output: String) -> iced_layershell::reexport::NewLayerShel
         output_option: OutputOption::OutputName(output),
         events_transparent: true,
         namespace: Some(String::from("zehll-wallpaper")),
+        blur_option: Default::default(),
     }
 }
 

@@ -9,7 +9,7 @@ emojis = "0.9.1"
 enumflags2 = "0.7.12"
 freedesktop-icons = "0.4.0"
 iced = { version = "0.14", features = ["canvas", "image", "svg", "tokio"] }
-iced_layershell = "0.19.1"
+iced_exwlshell = "0.21.4"
 # Already built for iced; Zehll decodes grim's frames and encodes snips with it.
 image = { version = "0.25", default-features = false, features = ["png", "pnm", "jpeg", "webp", "bmp", "gif"] }
 serde_json = "1.0.154"
@@ -17,5 +17,4 @@ system-tray = "0.8.9"
 tokio = { version = "1.54.1", features = ["net", "io-util", "signal", "process", "sync", "time"] }
 wayland-client = "0.31.15"
 wayland-protocols-hyprland = { version = "1.2.0", features = ["client"] }
-winit-core = "=0.31.0-beta.2"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
