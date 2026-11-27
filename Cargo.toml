@@ -20,6 +20,6 @@ wayland-protocols-hyprland = { version = "1.2.0", features = ["client"] }
 winit-core = "=0.31.0-beta.2"
 zbus = { version = "5", default-features = false, features = ["tokio"] }
 
-# iced_layershell 0.19.1, vendored to carry fixes not released yet.
+# iced_layershell 0.19.1 with the present-error recovery backported; see vendor/iced_layershell/PATCHES.md.
 [patch.crates-io]
 iced_layershell = { path = "vendor/iced_layershell" }
